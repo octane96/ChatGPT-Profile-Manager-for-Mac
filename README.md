@@ -1,6 +1,6 @@
 # ChatGPT Profile Manager for Mac
 
-ChatGPTデスクトップアプリのCodexビューを、複数のChatGPTアカウントで使い分けるためのmacOS用ヘルパーアプリです。通常のウィンドウとDockアイコンから操作でき、メニューバーには常駐しません。
+ChatGPTデスクトップアプリのCodexビューを、複数のChatGPTアカウントで使い分けるためのmacOS用ヘルパーアプリです。
 
 ## 現在のバージョン
 
