@@ -1,0 +1,47 @@
+#!/bin/zsh
+set -euo pipefail
+
+PROJECT_DIR="${0:A:h}"
+WORKSPACE_DIR="$PROJECT_DIR"
+OUTPUT_DIR="$WORKSPACE_DIR/outputs"
+BUILD_DIR="$PROJECT_DIR/.build-release"
+TEST_BUILD_DIR="$PROJECT_DIR/.build-package-test"
+CLANG_CACHE_DIR="$PROJECT_DIR/.cache/package-clang"
+SWIFTPM_CACHE_DIR="$PROJECT_DIR/.cache/package-swiftpm"
+APP_BUNDLE="$OUTPUT_DIR/ChatGPT Profile Manager.app"
+APP_ZIP="$OUTPUT_DIR/ChatGPT-Profile-Manager-macOS.zip"
+
+if [[ -e "$APP_BUNDLE" || -e "$APP_ZIP" ]]; then
+  print -u2 "Output already exists. Move the existing app and zip before packaging again."
+  exit 1
+fi
+
+mkdir -p "$OUTPUT_DIR"
+
+CLANG_MODULE_CACHE_PATH="$CLANG_CACHE_DIR" \
+SWIFTPM_MODULECACHE_OVERRIDE="$SWIFTPM_CACHE_DIR" \
+swift test \
+  --disable-sandbox \
+  --package-path "$PROJECT_DIR" \
+  --scratch-path "$TEST_BUILD_DIR"
+
+CLANG_MODULE_CACHE_PATH="$CLANG_CACHE_DIR" \
+SWIFTPM_MODULECACHE_OVERRIDE="$SWIFTPM_CACHE_DIR" \
+swift build \
+  --disable-sandbox \
+  --package-path "$PROJECT_DIR" \
+  --configuration release \
+  --build-path "$BUILD_DIR"
+
+mkdir -p "$APP_BUNDLE/Contents/MacOS"
+mkdir -p "$APP_BUNDLE/Contents/Resources"
+
+cp "$BUILD_DIR/release/CodexAccountSwitcher" \
+  "$APP_BUNDLE/Contents/MacOS/CodexAccountSwitcher"
+cp "$PROJECT_DIR/Resources/Info.plist" "$APP_BUNDLE/Contents/Info.plist"
+
+codesign --force --deep --sign - "$APP_BUNDLE"
+ditto -c -k --sequesterRsrc --keepParent "$APP_BUNDLE" "$APP_ZIP"
+
+print "$APP_BUNDLE"
+print "$APP_ZIP"
