@@ -22,13 +22,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
-        if let iconURL = Bundle.main.url(
-            forResource: "ChatGPTProfileManager",
-            withExtension: "icns"
-        ), let appIcon = NSImage(contentsOf: iconURL) {
-            appIcon.accessibilityDescription = "ChatGPT Profile Manager"
-            NSApp.applicationIconImage = appIcon
-        }
         configureMainMenu()
         configureWindow()
         refreshUI()
