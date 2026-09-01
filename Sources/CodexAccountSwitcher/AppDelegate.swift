@@ -94,6 +94,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             defer: false
         )
         window.title = "ChatGPT Profile Manager"
+        window.tabbingMode = .disallowed
         window.minSize = NSSize(width: 560, height: 500)
         window.isReleasedWhenClosed = false
         window.center()
@@ -462,6 +463,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             defer: false
         )
         guideWindow.title = "このアプリの仕組み"
+        guideWindow.tabbingMode = .disallowed
         guideWindow.minSize = NSSize(width: 560, height: 480)
         guideWindow.isReleasedWhenClosed = false
         guideWindow.center()
@@ -476,10 +478,138 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         let guideTextView = NSTextView(
             frame: NSRect(x: 0, y: 0, width: 580, height: 1_300)
         )
+        let bodyFont = NSFont.systemFont(ofSize: 14)
+        let titleFont = NSFont.systemFont(ofSize: 24, weight: .bold)
+        let sectionFont = NSFont.systemFont(ofSize: 16, weight: .semibold)
+        let noteFont = NSFont.systemFont(ofSize: 15, weight: .semibold)
+
+        let bodyParagraphStyle = NSMutableParagraphStyle()
+        bodyParagraphStyle.lineSpacing = 4
+        bodyParagraphStyle.paragraphSpacing = 4
+
+        let titleParagraphStyle = NSMutableParagraphStyle()
+        titleParagraphStyle.paragraphSpacing = 8
+
+        let sectionParagraphStyle = NSMutableParagraphStyle()
+        sectionParagraphStyle.paragraphSpacingBefore = 4
+        sectionParagraphStyle.paragraphSpacing = 1
+
+        let noteParagraphStyle = NSMutableParagraphStyle()
+        noteParagraphStyle.lineSpacing = 3
+        noteParagraphStyle.paragraphSpacing = 4
+
+        let guideContent = NSMutableAttributedString()
+        func appendGuideText(
+            _ text: String,
+            font: NSFont,
+            color: NSColor = .labelColor,
+            paragraphStyle: NSParagraphStyle
+        ) {
+            guideContent.append(
+                NSAttributedString(
+                    string: text,
+                    attributes: [
+                        .font: font,
+                        .foregroundColor: color,
+                        .paragraphStyle: paragraphStyle
+                    ]
+                )
+            )
+        }
+
+        appendGuideText(
+            "このアプリの仕組み\n",
+            font: titleFont,
+            paragraphStyle: titleParagraphStyle
+        )
+        appendGuideText(
+            "ChatGPT Profile Managerは、ChatGPTデスクトップアプリのアカウント自体を変更するアプリではありません。アカウントごとに用意した保存先を指定して、Codexビューを一度終了・再起動するランチャーです。アカウントの認証やプロジェクトの同期はChatGPT／Codex側が行い、このアプリは起動先と登録情報を管理します。\n\n",
+            font: bodyFont,
+            color: .secondaryLabelColor,
+            paragraphStyle: bodyParagraphStyle
+        )
+
+        let guideSections = [
+            (
+                "1. このアプリが管理する情報",
+                "一覧に保存されるのは、表示名、内部ID、プロファイル用ディレクトリ名、既存環境への割り当て、最後に起動したアカウントです。表示名はメールアドレスでなくてもよく、名前を変更しても保存データは変わりません。認証情報やプロジェクトの内容そのものは、この一覧ではなく、既存環境または各アカウントのプロファイル保存先に保持されます。"
+            ),
+            (
+                "2. アカウントの登録",
+                "「アカウントを追加…」で任意の表示名を入力します。名前は1文字以上60文字以内で、同じ名前は登録できません。登録数に固定の上限はありません。登録しただけではCodexは起動せず、一覧の「開く」を押した時にだけ対象アカウントの環境を起動します。"
+            ),
+            (
+                "3. 初回登録時の選択",
+                "最初のアカウントを追加するとき、または既存環境がまだ未割り当ての間に追加するときは、現在のCodex環境に紐づけるか確認します。「既存環境と紐づける」を選ぶと、そのアカウントを1つだけ既存環境へ固定します。「新規の分離プロファイルにする」を選ぶと、既存環境は未割り当てのままです。この場合、次のアカウント追加時にも同じ確認を行います。"
+            ),
+            (
+                "4. 既存環境に紐づけた場合",
+                "紐づけられるのは1アカウントだけです。紐づけたアカウントは、現在Macで通常使用しているCodexの既定の保存先をそのまま使います。既存のプロジェクト、チャット、設定、ログイン状態をコピー・移動・変換しません。紐づけが確定した後に追加するアカウントは、すべて新規の分離プロファイルになります。"
+            ),
+            (
+                "5. 分離プロファイルの保存先",
+                "既存環境に紐づけなかったアカウントには、アカウントごとに専用の保存先を作ります。場所は「~/Library/Application Support/Codex Account Switcher/Profiles/」の下で、各アカウントに固有のディレクトリが割り当てられます。その中を「CodexHome」と「ElectronUserData」に分け、Codex側の設定・認証・セッション・ログ・スキルと、ChatGPTデスクトップアプリ側のCookie・ログイン状態・アプリデータを分離します。保存先はメイン画面の「プロファイル保存先を開く」から確認できます。"
+            ),
+            (
+                "6. 分離プロファイルを初めて使うとき",
+                "分離プロファイルを初めて「開く」と、必要なディレクトリを作成してからCodexを起動します。既存環境のデータはコピーされないため、その保存先ではChatGPTアカウントへのログインが必要です。一度ログインした後の認証状態や作成したプロジェクト・チャットは、その分離プロファイル内に保存され、他のアカウントのプロファイルからは自動的に見えません。"
+            ),
+            (
+                "7. アカウントを切り替える流れ",
+                "一覧の「開く」を押すと、①実行中のCodexを探す、②実行中なら通常終了を依頼する、③終了を確認する、④選択したアカウントの保存先を指定してCodexを起動する、⑤最後に起動したアカウントを記録する、という順で処理します。Codexが10秒以内に終了しない場合は強制終了せず、エラーを表示して切り替えを止めます。切り替え前に実行中のローカルタスクを確認してください。"
+            ),
+            (
+                "8. 切り替えで引き継がれるもの・引き継がれないもの",
+                "引き継がれるのは、ChatGPT Profile Managerに登録した表示名・並び順・紐づけ状態などの管理情報だけです。アカウント間でログインCookie、Codexの設定、セッション、ログ、プロジェクト、チャットをコピーしたり、クラウド上の履歴を統合したりはしません。ChatGPT側で見えるデータは、起動したプロファイルでログインしているアカウントの権限に従います。"
+            ),
+            (
+                "9. 名前変更と並び替え",
+                "「名前を変更…」は一覧の表示名だけを変更します。行をドラッグ＆ドロップすると表示順だけを変更します。どちらの操作でも、ログイン状態、プロジェクト、チャット、保存先、既存環境との紐づけ先は変わりません。"
+            ),
+            (
+                "10. 分離プロファイルの削除",
+                "分離プロファイルの「削除…」は、Codexが終了している場合にだけ実行できます。確認後、そのアカウントの保存フォルダをmacOSのゴミ箱へ移動し、一覧の登録も削除します。既存環境に紐づいたアカウントは、既存データを保護するため削除できません。フォルダはゴミ箱から戻せますが、登録情報は別に削除されるため、アプリ一覧へ自動的に復帰するわけではありません。"
+            ),
+            (
+                "11. 紐づけを間違えた場合の復旧",
+                "メイン画面の「既存環境の紐づけを誤った場合…」から、ChatGPT Profile Manager上の紐づけ登録だけを外せます。Codexが起動中の場合は実行できません。既存環境のプロジェクト、チャット、設定、ログイン情報や、他の分離プロファイルは削除・変更しません。解除後に次のアカウントを追加すると、既存環境へ紐づけるか再び確認します。"
+            ),
+            (
+                "12. アプリ本体とデータの場所",
+                "ChatGPT Profile Managerのアプリ本体と、アカウント一覧・プロファイルの保存先は別です。アプリ本体を移動・更新・削除しても、プロファイル保存先のデータは自動削除されません。不要になった分離プロファイルは、アプリの「削除…」からゴミ箱へ移動してください。"
+            )
+        ]
+
+        for (heading, body) in guideSections {
+            appendGuideText(
+                "\(heading)\n",
+                font: sectionFont,
+                paragraphStyle: sectionParagraphStyle
+            )
+            appendGuideText(
+                "\(body)\n\n",
+                font: bodyFont,
+                paragraphStyle: bodyParagraphStyle
+            )
+        }
+
+        appendGuideText(
+            "注意\n",
+            font: noteFont,
+            color: .systemOrange,
+            paragraphStyle: sectionParagraphStyle
+        )
+        appendGuideText(
+            "このアプリはOpenAI公式機能ではありません。アカウントの利用上限を回避する目的では使用せず、普段のChatGPT／Codexアイコンから直接起動すると既定の環境が開く場合があるため、切り替え時はこのアプリの「開く」を使ってください。切り替え前には、実行中のローカルタスクがないことを確認してください。",
+            font: bodyFont,
+            color: .secondaryLabelColor,
+            paragraphStyle: noteParagraphStyle
+        )
+
         guideTextView.isEditable = false
         guideTextView.isSelectable = true
         guideTextView.drawsBackground = false
-        guideTextView.font = .systemFont(ofSize: 13)
+        guideTextView.font = bodyFont
         guideTextView.textColor = .labelColor
         guideTextView.textContainerInset = NSSize(width: 22, height: 22)
         guideTextView.isVerticallyResizable = true
@@ -490,35 +620,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             height: CGFloat.greatestFiniteMagnitude
         )
         guideTextView.textContainer?.widthTracksTextView = true
-        guideTextView.string = """
-        このアプリの仕組み
-
-        ChatGPT Profile Managerは、アカウントごとにログイン状態とローカルデータの保存先を分けて、ChatGPTデスクトップアプリのCodexビューを起動する補助アプリです。
-
-        1. アカウントの登録
-        アカウント名を登録すると、一覧からそのアカウントを起動できます。名前はメールアドレスでなくても構いません。登録数に固定の上限はありません。
-
-        2. 既存環境との紐づけ
-        最初の登録時、または既存環境がまだ割り当てられていない間の追加時に、現在のCodex環境と紐づけるか確認します。紐づけた1アカウントだけが、既存のプロジェクト・チャット・設定・ログイン状態をコピーせずそのまま使用します。紐づけ後に追加するアカウントは、すべて分離プロファイルになります。
-
-        3. 分離プロファイル
-        分離アカウントは、アカウント固有のCODEX_HOMEとElectronのユーザーデータ保存先を使います。ログインCookie、Codexの設定、セッション、ログ、スキル、Electron側の状態が既存環境と混ざらないようにします。保存先は「プロファイル保存先を開く」から確認できます。
-
-        4. アカウントの切り替え
-        一覧の「開く」を押すと、実行中のCodexを通常終了してから、選択した保存先を指定してCodexを再起動します。切り替え前に実行中のローカルタスクを確認してください。
-
-        5. 並び替え
-        アカウントの行をドラッグ＆ドロップすると一覧の順序を変更できます。順序はChatGPT Profile Managerの設定に保存され、プロファイルの中身や紐づけ先は変わりません。
-
-        6. プロファイルの削除
-        分離プロファイルの「削除…」を押すと、確認後にそのアカウントの保存データと登録をゴミ箱へ移動します。ゴミ箱から復元できます。既存環境に紐づいたアカウントは、データ保護のため削除できません。不要な紐づけを外す場合は、メイン画面の復旧導線を使ってください。
-
-        7. 誤設定時の復旧
-        既存環境との紐づけを間違えた場合は、メイン画面の復旧ボタンから登録だけを外せます。既存環境や他の分離プロファイルは削除・変更しません。
-
-        注意
-        このアプリはOpenAI公式機能ではありません。アカウントの利用上限を回避する目的では使用せず、切り替え前にタスクの状態を確認してください。
-        """
+        guideTextView.textStorage?.setAttributedString(guideContent)
         scrollView.documentView = guideTextView
 
         guideWindow.contentView = NSView()
