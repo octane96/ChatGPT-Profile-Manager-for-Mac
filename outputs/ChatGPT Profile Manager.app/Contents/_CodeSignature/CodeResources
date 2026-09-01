@@ -3,9 +3,22 @@
 <plist version="1.0">
 <dict>
 	<key>files</key>
-	<dict/>
+	<dict>
+		<key>Resources/ChatGPTProfileManager.icns</key>
+		<data>
+		kegalF+mdgD8dcoHKDFYFP6IqUI=
+		</data>
+	</dict>
 	<key>files2</key>
-	<dict/>
+	<dict>
+		<key>Resources/ChatGPTProfileManager.icns</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			FIwsLwFiob7qTp3AZh2wuhltw+Yzu80ESLYGf1CJaeA=
+			</data>
+		</dict>
+	</dict>
 	<key>rules</key>
 	<dict>
 		<key>^Resources/</key>

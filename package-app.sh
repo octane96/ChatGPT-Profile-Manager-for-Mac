@@ -39,6 +39,8 @@ mkdir -p "$APP_BUNDLE/Contents/Resources"
 cp "$BUILD_DIR/release/CodexAccountSwitcher" \
   "$APP_BUNDLE/Contents/MacOS/CodexAccountSwitcher"
 cp "$PROJECT_DIR/Resources/Info.plist" "$APP_BUNDLE/Contents/Info.plist"
+cp "$PROJECT_DIR/Resources/ChatGPTProfileManager.icns" \
+  "$APP_BUNDLE/Contents/Resources/ChatGPTProfileManager.icns"
 
 codesign --force --deep --sign - "$APP_BUNDLE"
 ditto -c -k --sequesterRsrc --keepParent "$APP_BUNDLE" "$APP_ZIP"

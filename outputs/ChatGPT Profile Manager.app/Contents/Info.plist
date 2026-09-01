@@ -8,6 +8,8 @@
     <string>CodexAccountSwitcher</string>
     <key>CFBundleIdentifier</key>
     <string>com.local.codex-account-switcher</string>
+    <key>CFBundleIconFile</key>
+    <string>ChatGPTProfileManager.icns</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
