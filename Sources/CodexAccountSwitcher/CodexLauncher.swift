@@ -112,6 +112,8 @@ final class CodexLauncher {
             throw SwitcherError.codexAppNotFound
         }
 
+        try await terminateRunningCodexInstances()
+
         let launchMode: ProfileLaunchMode
         if account.id == stateStore.existingEnvironmentAccountID {
             launchMode = .existingDefault
@@ -124,7 +126,6 @@ final class CodexLauncher {
             launchMode = .isolated(paths)
         }
 
-        try await terminateRunningCodexInstances()
         try await launchCodex(appURL: appURL, mode: launchMode)
         stateStore.setLastLaunchedAccount(account)
     }

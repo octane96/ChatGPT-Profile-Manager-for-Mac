@@ -548,7 +548,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             ),
             (
                 "5. 分離プロファイルの保存先",
-                "既存環境に紐づけなかったアカウントには、アカウントごとに専用の保存先を作ります。場所は「~/Library/Application Support/Codex Account Switcher/Profiles/」の下で、各アカウントに固有のディレクトリが割り当てられます。その中を「CodexHome」と「ElectronUserData」に分け、Codex側の設定・認証・セッション・ログ・スキルと、ChatGPTデスクトップアプリ側のCookie・ログイン状態・アプリデータを分離します。保存先はメイン画面の「プロファイル保存先を開く」から確認できます。"
+                "既存環境に紐づけなかったアカウントには、アカウントごとに専用の保存先を作ります。場所は「~/Library/Application Support/ChatGPT Profile Manager/Profiles/」の下で、各アカウントに固有のディレクトリが割り当てられます。その中を「CodexHome」と「ElectronUserData」に分け、Codex側の設定・認証・セッション・ログ・スキルと、ChatGPTデスクトップアプリ側のCookie・ログイン状態・アプリデータを分離します。保存先はメイン画面の「プロファイル保存先を開く」から確認できます。以前の「Codex Account Switcher」フォルダが残っている場合は、初回利用時に新しい名前へ移行します。"
             ),
             (
                 "6. 分離プロファイルを初めて使うとき",
@@ -576,7 +576,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
             ),
             (
                 "12. アプリ本体とデータの場所",
-                "ChatGPT Profile Managerのアプリ本体と、アカウント一覧・プロファイルの保存先は別です。アプリ本体を移動・更新・削除しても、プロファイル保存先のデータは自動削除されません。不要になった分離プロファイルは、アプリの「削除…」からゴミ箱へ移動してください。"
+                "ChatGPT Profile Managerのアプリ本体と、アカウント一覧・プロファイルの保存先は別です。アプリ本体を移動・更新・削除しても、プロファイル保存先のデータは自動削除されません。以前の「Codex Account Switcher」フォルダがある場合は、プロファイルを失わないように新しい保存先へ移行します。新旧両方のフォルダがある場合は、同名データを上書きせず、不足しているデータだけを統合します。不要になった分離プロファイルは、アプリの「削除…」からゴミ箱へ移動してください。"
             )
         ]
 

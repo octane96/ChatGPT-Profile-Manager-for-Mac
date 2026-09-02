@@ -41,15 +41,134 @@ struct ProfilePaths: Equatable, Sendable {
 }
 
 enum SwitcherLocations {
-    static func applicationSupportDirectory(fileManager: FileManager = .default) throws -> URL {
-        guard let base = fileManager.urls(
+    private static let currentDirectoryName = "ChatGPT Profile Manager"
+    private static let legacyDirectoryName = "Codex Account Switcher"
+
+    static func applicationSupportDirectory(
+        fileManager: FileManager = .default,
+        baseDirectory: URL? = nil
+    ) throws -> URL {
+        let base: URL
+        if let baseDirectory {
+            base = baseDirectory
+        } else if let applicationSupportDirectory = fileManager.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
-        ).first else {
+        ).first {
+            base = applicationSupportDirectory
+        } else {
             throw SwitcherError.applicationSupportUnavailable
         }
 
-        return base.appendingPathComponent("Codex Account Switcher", isDirectory: true)
+        let currentDirectory = base.appendingPathComponent(
+            currentDirectoryName,
+            isDirectory: true
+        )
+        let legacyDirectory = base.appendingPathComponent(
+            legacyDirectoryName,
+            isDirectory: true
+        )
+
+        return try migrateLegacyDirectory(
+            from: legacyDirectory,
+            to: currentDirectory,
+            fileManager: fileManager
+        )
+    }
+
+    private static func migrateLegacyDirectory(
+        from legacyDirectory: URL,
+        to currentDirectory: URL,
+        fileManager: FileManager
+    ) throws -> URL {
+        guard fileManager.fileExists(atPath: legacyDirectory.path) else {
+            return currentDirectory
+        }
+
+        guard fileManager.fileExists(atPath: currentDirectory.path) else {
+            do {
+                try fileManager.moveItem(at: legacyDirectory, to: currentDirectory)
+                return currentDirectory
+            } catch {
+                // Keep using the legacy directory if the move cannot be completed.
+                // This preserves access to existing profiles instead of risking data loss.
+                return legacyDirectory
+            }
+        }
+
+        guard isDirectory(currentDirectory, fileManager: fileManager) else {
+            return legacyDirectory
+        }
+        guard isDirectory(legacyDirectory, fileManager: fileManager) else {
+            return currentDirectory
+        }
+
+        try mergeDirectoryContents(
+            from: legacyDirectory,
+            to: currentDirectory,
+            fileManager: fileManager
+        )
+        return currentDirectory
+    }
+
+    private static func mergeDirectoryContents(
+        from sourceDirectory: URL,
+        to destinationDirectory: URL,
+        fileManager: FileManager
+    ) throws {
+        let entries = try fileManager.contentsOfDirectory(
+            at: sourceDirectory,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: []
+        )
+
+        for sourceEntry in entries {
+            let destinationEntry = destinationDirectory.appendingPathComponent(
+                sourceEntry.lastPathComponent,
+                isDirectory: isDirectory(sourceEntry, fileManager: fileManager)
+            )
+
+            guard fileManager.fileExists(atPath: destinationEntry.path) else {
+                try fileManager.moveItem(at: sourceEntry, to: destinationEntry)
+                continue
+            }
+
+            guard
+                isDirectory(sourceEntry, fileManager: fileManager),
+                isDirectory(destinationEntry, fileManager: fileManager)
+            else {
+                // Never overwrite a same-named file or profile. Leave it in the
+                // legacy directory so the user can compare or recover it manually.
+                continue
+            }
+
+            try mergeDirectoryContents(
+                from: sourceEntry,
+                to: destinationEntry,
+                fileManager: fileManager
+            )
+        }
+
+        if try fileManager.contentsOfDirectory(
+            at: sourceDirectory,
+            includingPropertiesForKeys: nil,
+            options: []
+        ).isEmpty {
+            try fileManager.removeItem(at: sourceDirectory)
+        }
+    }
+
+    private static func isDirectory(
+        _ url: URL,
+        fileManager: FileManager
+    ) -> Bool {
+        guard
+            let values = try? url.resourceValues(forKeys: [.isDirectoryKey]),
+            let isDirectory = values.isDirectory
+        else {
+            return false
+        }
+        return isDirectory
     }
 }
 

@@ -62,6 +62,80 @@ final class CodexAccountSwitcherTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: paths.electronUserData.path))
     }
 
+    func testLegacyApplicationSupportDirectoryMovesToNewAppName() throws {
+        let fileManager = FileManager.default
+        let applicationSupport = fileManager.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? fileManager.removeItem(at: applicationSupport) }
+
+        let legacyDirectory = applicationSupport
+            .appendingPathComponent("Codex Account Switcher", isDirectory: true)
+        let legacyProfile = legacyDirectory
+            .appendingPathComponent("Profiles/account-one/CodexHome", isDirectory: true)
+        try fileManager.createDirectory(at: legacyProfile, withIntermediateDirectories: true)
+
+        let migratedDirectory = try SwitcherLocations.applicationSupportDirectory(
+            fileManager: fileManager,
+            baseDirectory: applicationSupport
+        )
+
+        XCTAssertEqual(migratedDirectory.lastPathComponent, "ChatGPT Profile Manager")
+        XCTAssertFalse(fileManager.fileExists(atPath: legacyDirectory.path))
+        XCTAssertTrue(
+            fileManager.fileExists(
+                atPath: migratedDirectory
+                    .appendingPathComponent("Profiles/account-one/CodexHome")
+                    .path
+            )
+        )
+    }
+
+    func testLegacyDirectoryMergesWithoutOverwritingExistingData() throws {
+        let fileManager = FileManager.default
+        let applicationSupport = fileManager.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? fileManager.removeItem(at: applicationSupport) }
+
+        let legacyDirectory = applicationSupport
+            .appendingPathComponent("Codex Account Switcher", isDirectory: true)
+        let currentDirectory = applicationSupport
+            .appendingPathComponent("ChatGPT Profile Manager", isDirectory: true)
+        let legacyOnlyFile = legacyDirectory.appendingPathComponent("legacy.txt")
+        let legacySharedFile = legacyDirectory
+            .appendingPathComponent("Profiles/shared/state.txt")
+        let currentSharedFile = currentDirectory
+            .appendingPathComponent("Profiles/shared/state.txt")
+
+        try fileManager.createDirectory(
+            at: legacySharedFile.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try fileManager.createDirectory(
+            at: currentSharedFile.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("legacy".utf8).write(to: legacyOnlyFile)
+        try Data("legacy".utf8).write(to: legacySharedFile)
+        try Data("current".utf8).write(to: currentSharedFile)
+
+        let migratedDirectory = try SwitcherLocations.applicationSupportDirectory(
+            fileManager: fileManager,
+            baseDirectory: applicationSupport
+        )
+
+        XCTAssertEqual(migratedDirectory, currentDirectory)
+        XCTAssertEqual(
+            try String(contentsOf: currentSharedFile, encoding: .utf8),
+            "current"
+        )
+        XCTAssertTrue(
+            fileManager.fileExists(
+                atPath: currentDirectory.appendingPathComponent("legacy.txt").path
+            )
+        )
+        XCTAssertTrue(fileManager.fileExists(atPath: legacySharedFile.path))
+    }
+
     func testCanAddAnyNumberOfIsolatedAccountsWhileExistingEnvironmentIsUnassigned() throws {
         let (store, defaults, suiteName) = try makeStore()
         defer { defaults.removePersistentDomain(forName: suiteName) }

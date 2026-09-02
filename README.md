@@ -42,9 +42,9 @@ ChatGPTデスクトップアプリのCodexビューを、複数のChatGPTアカ�
 
 分離プロファイルの保存先は次のとおりです。
 
-`~/Library/Application Support/Codex Account Switcher/Profiles/`
+`~/Library/Application Support/ChatGPT Profile Manager/Profiles/`
 
-アプリ名変更後も、既存データとの互換性を保つため保存フォルダの内部名は従来のままです。
+アプリ名変更前の`Codex Account Switcher`フォルダが存在する場合は、初回利用時に`ChatGPT Profile Manager`へ自動移行します。新旧両方のフォルダがある場合は、同名データを上書きせず、不足しているデータだけを統合します。
 
 ## 削除と復旧
 
