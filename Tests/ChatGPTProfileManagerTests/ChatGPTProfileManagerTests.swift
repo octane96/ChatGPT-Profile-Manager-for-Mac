@@ -546,10 +546,114 @@ final class ChatGPTProfileManagerTests: XCTestCase {
         XCTAssertTrue(ProfileStateStore(defaults: defaults).hasShownMechanismGuide)
     }
 
+    func testSettingsCopyBacksUpDestinationAndKeepsAuthenticationOut() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sourceHome = root.appendingPathComponent("source", isDirectory: true)
+        let destinationHome = root.appendingPathComponent("destination", isDirectory: true)
+        try FileManager.default.createDirectory(at: sourceHome, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: destinationHome, withIntermediateDirectories: true)
+        try Data("source instructions".utf8).write(to: sourceHome.appendingPathComponent("AGENTS.md"))
+        try Data("source config".utf8).write(to: sourceHome.appendingPathComponent("config.toml"))
+        try Data("old config".utf8).write(to: destinationHome.appendingPathComponent("config.toml"))
+        try Data("destination auth".utf8).write(to: destinationHome.appendingPathComponent("auth.json"))
+
+        let store = SettingsSharingStore(baseDirectory: root.appendingPathComponent("manager", isDirectory: true))
+        let source = ProfileStorageReference.isolated(directoryName: "source")
+        let destination = ProfileStorageReference.isolated(directoryName: "destination")
+        let summary = try store.copy(
+            source: source,
+            destination: destination,
+            items: [.instructions, .config],
+            codexHomes: [source: sourceHome, destination: destinationHome]
+        )
+
+        XCTAssertEqual(try String(contentsOf: destinationHome.appendingPathComponent("AGENTS.md")), "source instructions")
+        XCTAssertEqual(try String(contentsOf: destinationHome.appendingPathComponent("config.toml")), "source config")
+        XCTAssertEqual(try String(contentsOf: destinationHome.appendingPathComponent("auth.json")), "destination auth")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: summary.backupDirectory.appendingPathComponent("config.toml").path))
+        XCTAssertEqual(store.loadRegistry().cloneHistory.count, 1)
+    }
+
+    func testSettingsSharePersistsGroupAndLeaveKeepsCurrentContent() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sourceHome = root.appendingPathComponent("source", isDirectory: true)
+        let destinationHome = root.appendingPathComponent("destination", isDirectory: true)
+        try FileManager.default.createDirectory(at: sourceHome, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: destinationHome, withIntermediateDirectories: true)
+        try Data("shared instructions".utf8).write(to: sourceHome.appendingPathComponent("AGENTS.md"))
+        try Data("old instructions".utf8).write(to: destinationHome.appendingPathComponent("AGENTS.md"))
+
+        let store = SettingsSharingStore(baseDirectory: root.appendingPathComponent("manager", isDirectory: true))
+        let source = ProfileStorageReference.isolated(directoryName: "source")
+        let destination = ProfileStorageReference.isolated(directoryName: "destination")
+        let group = try store.createShareGroup(
+            name: "Shared",
+            source: source,
+            destinations: [destination],
+            items: [.instructions],
+            codexHomes: [source: sourceHome, destination: destinationHome]
+        )
+
+        XCTAssertEqual(store.loadRegistry().groups.first?.id, group.id)
+        XCTAssertEqual(store.binding(for: destination)?.groupID, group.id)
+        XCTAssertEqual(try String(contentsOf: destinationHome.appendingPathComponent("AGENTS.md")), "shared instructions")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: root.appendingPathComponent("manager/Settings/SharedSettings/\(group.id.uuidString)/manifest.json").path))
+        XCTAssertTrue(try FileManager.default.attributesOfItem(atPath: destinationHome.appendingPathComponent("AGENTS.md").path)[.type] as? FileAttributeType == .typeSymbolicLink)
+
+        _ = try store.leaveShareGroup(profile: destination, codexHome: destinationHome)
+        XCTAssertEqual(try String(contentsOf: destinationHome.appendingPathComponent("AGENTS.md")), "shared instructions")
+        XCTAssertFalse(try FileManager.default.attributesOfItem(atPath: destinationHome.appendingPathComponent("AGENTS.md").path)[.type] as? FileAttributeType == .typeSymbolicLink)
+        XCTAssertNil(store.binding(for: destination))
+    }
+
+    func testSettingsShareRejectsSensitiveConfigBeforeChangingProfiles() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sourceHome = root.appendingPathComponent("source", isDirectory: true)
+        let destinationHome = root.appendingPathComponent("destination", isDirectory: true)
+        try FileManager.default.createDirectory(at: sourceHome, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: destinationHome, withIntermediateDirectories: true)
+        try Data("api_key = \"secret\"\n".utf8).write(to: sourceHome.appendingPathComponent("config.toml"))
+        try Data("destination".utf8).write(to: destinationHome.appendingPathComponent("config.toml"))
+
+        let store = SettingsSharingStore(baseDirectory: root.appendingPathComponent("manager", isDirectory: true))
+        let source = ProfileStorageReference.isolated(directoryName: "source")
+        let destination = ProfileStorageReference.isolated(directoryName: "destination")
+        XCTAssertThrowsError(
+            try store.createShareGroup(
+                name: "Sensitive",
+                source: source,
+                destinations: [destination],
+                items: [.config],
+                codexHomes: [source: sourceHome, destination: destinationHome]
+            )
+        ) { error in
+            XCTAssertEqual(error as? SettingsSharingError, .configContainsSensitiveValues)
+        }
+        XCTAssertEqual(try String(contentsOf: destinationHome.appendingPathComponent("config.toml")), "destination")
+        XCTAssertTrue(store.loadRegistry().groups.isEmpty)
+    }
+
     private func makeStore() throws -> (ProfileStateStore, UserDefaults, String) {
         let suiteName = "ChatGPTProfileManagerTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defaults.removePersistentDomain(forName: suiteName)
         return (ProfileStateStore(defaults: defaults), defaults, suiteName)
+    }
+
+    private func makeTemporaryDirectory() throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ChatGPTProfileManagerSettings-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        return directory
     }
 }

@@ -278,6 +278,132 @@ final class CodexLauncher {
         return ProfilePaths(profile: account, baseDirectory: baseDirectory).codexHome
     }
 
+    func settingsStorageReference(for account: AccountProfile) -> ProfileStorageReference {
+        if account.id == stateStore.existingEnvironmentAccountID {
+            return .existingEnvironment
+        }
+        return .isolated(directoryName: account.directoryName)
+    }
+
+    func settingsBinding(for account: AccountProfile) -> SettingsBinding? {
+        guard let baseDirectory = try? profileBaseDirectory() else {
+            return nil
+        }
+        return SettingsSharingStore(baseDirectory: baseDirectory).binding(
+            for: settingsStorageReference(for: account)
+        )
+    }
+
+    func settingsGroups() -> [SettingsGroup] {
+        guard let baseDirectory = try? profileBaseDirectory() else {
+            return []
+        }
+        return SettingsSharingStore(baseDirectory: baseDirectory).loadRegistry().groups
+    }
+
+    @discardableResult
+    func copySettings(
+        from sourceAccountID: UUID,
+        to destinationAccountID: UUID,
+        items: Set<ManagedSetting>
+    ) throws -> SettingsOperationSummary {
+        let sourceAccount = try account(for: sourceAccountID)
+        let destinationAccount = try account(for: destinationAccountID)
+        guard sourceAccount.id != destinationAccount.id else {
+            throw SettingsSharingError.sourceAndDestinationAreSame
+        }
+        try ensureSettingsProfilesClosed([sourceAccount, destinationAccount])
+        let homes = try settingsHomes(for: [sourceAccount, destinationAccount])
+        let baseDirectory = try profileBaseDirectory()
+        return try SettingsSharingStore(baseDirectory: baseDirectory).copy(
+            source: settingsStorageReference(for: sourceAccount),
+            destination: settingsStorageReference(for: destinationAccount),
+            items: items,
+            codexHomes: homes
+        )
+    }
+
+    @discardableResult
+    func createSettingsShare(
+        named name: String,
+        sourceAccountID: UUID,
+        destinationAccountIDs: [UUID],
+        items: Set<ManagedSetting>
+    ) throws -> SettingsGroup {
+        let sourceAccount = try account(for: sourceAccountID)
+        let destinationAccounts = try destinationAccountIDs.map { try account(for: $0) }
+        let affectedAccounts = [sourceAccount] + destinationAccounts
+        try ensureSettingsProfilesClosed(affectedAccounts)
+        let homes = try settingsHomes(for: affectedAccounts)
+        let references = affectedAccounts.map(settingsStorageReference(for:))
+        let baseDirectory = try profileBaseDirectory()
+        return try SettingsSharingStore(baseDirectory: baseDirectory).createShareGroup(
+            name: name,
+            source: settingsStorageReference(for: sourceAccount),
+            destinations: Array(references.dropFirst()),
+            items: items,
+            codexHomes: homes
+        )
+    }
+
+    @discardableResult
+    func leaveSettingsShare(for accountID: UUID) throws -> SettingsGroup {
+        let account = try account(for: accountID)
+        try ensureSettingsProfilesClosed([account])
+        guard let codexHome = codexHomeDirectory(for: account) else {
+            throw SettingsSharingError.transactionFailed
+        }
+        let baseDirectory = try profileBaseDirectory()
+        return try SettingsSharingStore(baseDirectory: baseDirectory).leaveShareGroup(
+            profile: settingsStorageReference(for: account),
+            codexHome: codexHome
+        )
+    }
+
+    @discardableResult
+    func joinSettingsShare(
+        groupID: UUID,
+        accountID: UUID
+    ) throws -> SettingsGroup {
+        let account = try account(for: accountID)
+        try ensureSettingsProfilesClosed([account])
+        guard let codexHome = codexHomeDirectory(for: account) else {
+            throw SettingsSharingError.transactionFailed
+        }
+        let baseDirectory = try profileBaseDirectory()
+        return try SettingsSharingStore(baseDirectory: baseDirectory).joinShareGroup(
+            groupID: groupID,
+            profile: settingsStorageReference(for: account),
+            codexHome: codexHome
+        )
+    }
+
+    private func account(for id: UUID) throws -> AccountProfile {
+        guard let account = stateStore.account(id: id) else {
+            throw ProfileManagerError.accountNotFound
+        }
+        return account
+    }
+
+    private func settingsHomes(
+        for accounts: [AccountProfile]
+    ) throws -> [ProfileStorageReference: URL] {
+        var homes: [ProfileStorageReference: URL] = [:]
+        for account in accounts {
+            guard let home = codexHomeDirectory(for: account) else {
+                throw SettingsSharingError.transactionFailed
+            }
+            homes[settingsStorageReference(for: account)] = home
+        }
+        return homes
+    }
+
+    private func ensureSettingsProfilesClosed(_ accounts: [AccountProfile]) throws {
+        guard !accounts.contains(where: { isAccountRunning(id: $0.id) }) else {
+            throw ProfileManagerError.codexMustBeClosed
+        }
+    }
+
     func open(accountID: UUID) async throws {
         guard let account = stateStore.account(id: accountID) else {
             throw ProfileManagerError.accountNotFound

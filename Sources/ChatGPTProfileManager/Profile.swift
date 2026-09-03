@@ -151,7 +151,7 @@ enum ProfileManagerError: LocalizedError, Equatable {
         case .codexMustBeClosed:
             return L10n.text(
                 "error.chatgpt-must-be-closed",
-                fallback: "このプロファイルを使用中のChatGPTを終了してから、登録情報を変更してください。"
+                fallback: "このプロファイルを使用中のChatGPTを終了してから、設定や登録情報を変更してください。"
             )
         case .accountNotFound:
             return L10n.text(

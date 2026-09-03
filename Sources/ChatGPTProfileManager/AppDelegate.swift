@@ -764,6 +764,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         )
         metadataStack.addArrangedSubview(badge)
 
+        if let binding = launcher.settingsBinding(for: account),
+           let group = launcher.settingsGroups().first(where: { $0.id == binding.groupID }) {
+            metadataStack.addArrangedSubview(
+                ProfileBadgeView(
+                    text: L10n.text(
+                        "settings-sharing.badge",
+                        fallback: "共有中：{name}",
+                        replacing: ["name": group.name]
+                    ),
+                    color: .systemOrange
+                )
+            )
+        }
+
         if isRunning {
             metadataStack.addArrangedSubview(
                 ProfileBadgeView(
@@ -864,6 +878,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             )
         )
         rowStack.addArrangedSubview(renameButton)
+
+        let settingsButton = NSButton(
+            title: L10n.text("settings-sharing.manage", fallback: "設定"),
+            target: self,
+            action: #selector(manageAccountSettings(_:))
+        )
+        settingsButton.bezelStyle = .inline
+        settingsButton.controlSize = .regular
+        settingsButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
+        settingsButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 28).isActive = true
+        settingsButton.identifier = NSUserInterfaceItemIdentifier(account.id.uuidString)
+        settingsButton.setAccessibilityLabel(
+            L10n.text(
+                "settings-sharing.manage.accessibility-label",
+                fallback: "{name}の設定を管理",
+                replacing: ["name": account.name]
+            )
+        )
+        rowStack.addArrangedSubview(settingsButton)
 
         let openButton = NSButton(
             title: isRunning
@@ -1176,6 +1209,460 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     @objc
     private func addAccount() {
         presentAddAccount()
+    }
+
+    @objc
+    private func manageAccountSettings(_ sender: NSButton) {
+        guard
+            let rawID = sender.identifier?.rawValue,
+            let accountID = UUID(uuidString: rawID),
+            let account = launcher.accounts.first(where: { $0.id == accountID })
+        else {
+            presentError(ProfileManagerError.accountNotFound)
+            return
+        }
+
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = L10n.text(
+            "settings-sharing.manage-title",
+            fallback: "「{name}」の設定を管理",
+            replacing: ["name": account.name]
+        )
+        alert.informativeText = L10n.text(
+            "settings-sharing.manage-message",
+            fallback: "ChatGPTのアカウント、チャット、プロジェクト、ログイン状態は対象外です。ここで扱うのはCodexのローカル設定だけです。"
+        )
+        let isShared = launcher.settingsBinding(for: account) != nil
+        if isShared {
+            alert.addButton(
+                withTitle: L10n.text(
+                    "settings-sharing.leave",
+                    fallback: "共有を解除して現在の設定を保持"
+                )
+            )
+        } else {
+            alert.addButton(
+                withTitle: L10n.text(
+                    "settings-sharing.share",
+                    fallback: "設定を共有"
+                )
+            )
+        }
+        alert.addButton(
+            withTitle: L10n.text(
+                "settings-sharing.copy",
+                fallback: "設定をコピー"
+            )
+        )
+        alert.addButton(withTitle: L10n.text("common.cancel", fallback: "キャンセル"))
+
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            if isShared {
+                leaveSettingsShare(accountID: accountID)
+            } else {
+                presentCreateSettingsShare(sourceAccountID: accountID)
+            }
+        case .alertSecondButtonReturn:
+            presentCopySettings(destinationAccountID: accountID)
+        default:
+            break
+        }
+    }
+
+    private func presentCreateSettingsShare(sourceAccountID: UUID) {
+        guard let sourceAccount = launcher.accounts.first(where: { $0.id == sourceAccountID }) else {
+            presentError(ProfileManagerError.accountNotFound)
+            return
+        }
+        let destinations = launcher.accounts.filter { $0.id != sourceAccountID }
+        guard !destinations.isEmpty else {
+            presentError(
+                SettingsSharingError.sourceAndDestinationAreSame,
+                title: L10n.text(
+                    "settings-sharing.error.title",
+                    fallback: "設定を共有できませんでした"
+                )
+            )
+            return
+        }
+
+        let groupNameField = NSTextField(string: "\(sourceAccount.name) 共有")
+        groupNameField.placeholderString = L10n.text(
+            "settings-sharing.group-placeholder",
+            fallback: "共有グループ名"
+        )
+        groupNameField.translatesAutoresizingMaskIntoConstraints = false
+        groupNameField.widthAnchor.constraint(equalToConstant: 420).isActive = true
+
+        let destinationStack = NSStackView()
+        destinationStack.orientation = .vertical
+        destinationStack.alignment = .leading
+        destinationStack.spacing = 4
+        var destinationButtons: [UUID: NSButton] = [:]
+        for destination in destinations {
+            let button = NSButton(
+                checkboxWithTitle: destination.name,
+                target: nil,
+                action: nil
+            )
+            button.setButtonType(.switch)
+            button.identifier = NSUserInterfaceItemIdentifier(destination.id.uuidString)
+            destinationStack.addArrangedSubview(button)
+            destinationButtons[destination.id] = button
+        }
+
+        let itemStack = makeManagedSettingCheckboxes(
+            defaults: [.instructions]
+        )
+        let accessory = NSStackView()
+        accessory.orientation = .vertical
+        accessory.alignment = .leading
+        accessory.spacing = 10
+        accessory.addArrangedSubview(
+            NSTextField(labelWithString: L10n.text("settings-sharing.group-name", fallback: "共有グループ名"))
+        )
+        accessory.addArrangedSubview(groupNameField)
+        accessory.addArrangedSubview(
+            NSTextField(labelWithString: L10n.text("settings-sharing.members", fallback: "共有するプロファイル"))
+        )
+        accessory.addArrangedSubview(destinationStack)
+        accessory.addArrangedSubview(
+            NSTextField(labelWithString: L10n.text("settings-sharing.items", fallback: "共有する設定"))
+        )
+        accessory.addArrangedSubview(itemStack.view)
+        accessory.setFrameSize(NSSize(width: 430, height: accessory.fittingSize.height))
+
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = L10n.text(
+            "settings-sharing.create-title",
+            fallback: "設定共有を作成"
+        )
+        alert.informativeText = L10n.text(
+            "settings-sharing.create-message",
+            fallback: "共有設定はアプリ管理下の共通ファイルになります。参加するすべてのChatGPTを終了してから適用します。"
+        )
+        alert.addButton(
+            withTitle: L10n.text("settings-sharing.create", fallback: "共有を作成")
+        )
+        alert.addButton(
+            withTitle: L10n.text("settings-sharing.join-existing", fallback: "既存の共有へ参加")
+        )
+        alert.addButton(withTitle: L10n.text("common.cancel", fallback: "キャンセル"))
+        alert.accessoryView = accessory
+
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            let selectedDestinations = destinations.filter {
+                destinationButtons[$0.id]?.state == .on
+            }
+            let selectedItems = Set(
+                itemStack.buttons.compactMap { setting, button in
+                    button.state == .on ? setting : nil
+                }
+            )
+            guard !selectedDestinations.isEmpty, !selectedItems.isEmpty else {
+                showTransientStatus(
+                    L10n.text(
+                        "settings-sharing.selection-required",
+                        fallback: "共有先と共有項目を1つ以上選択してください。"
+                    )
+                )
+                return
+            }
+            do {
+                let group = try launcher.createSettingsShare(
+                    named: groupNameField.stringValue,
+                    sourceAccountID: sourceAccountID,
+                    destinationAccountIDs: selectedDestinations.map(\.id),
+                    items: selectedItems
+                )
+                refreshUI()
+                showTransientStatus(
+                    L10n.text(
+                        "settings-sharing.created-success",
+                        fallback: "設定共有「{name}」を作成しました。ChatGPTの次回起動から反映されます。",
+                        replacing: ["name": group.name]
+                    )
+                )
+            } catch {
+                presentError(
+                    error,
+                    title: L10n.text(
+                        "settings-sharing.error.title",
+                        fallback: "設定を共有できませんでした"
+                    )
+                )
+            }
+        case .alertSecondButtonReturn:
+            presentJoinSettingsShare(accountID: sourceAccountID)
+        default:
+            break
+        }
+    }
+
+    private func presentJoinSettingsShare(accountID: UUID) {
+        guard let account = launcher.accounts.first(where: { $0.id == accountID }) else {
+            presentError(ProfileManagerError.accountNotFound)
+            return
+        }
+        let profile = launcher.settingsStorageReference(for: account)
+        let groups = launcher.settingsGroups().filter { !$0.members.contains(profile) }
+        guard !groups.isEmpty else {
+            presentError(
+                SettingsSharingError.groupNotFound,
+                title: L10n.text(
+                    "settings-sharing.error.title",
+                    fallback: "既存の共有へ参加できませんでした"
+                )
+            )
+            return
+        }
+
+        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 420, height: 26))
+        popup.addItems(withTitles: groups.map(\.name))
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = L10n.text(
+            "settings-sharing.join-title",
+            fallback: "既存の設定共有へ参加"
+        )
+        alert.informativeText = L10n.text(
+            "settings-sharing.join-message",
+            fallback: "「{name}」の選択した設定を共通ファイルへ切り替えます。現在の設定はバックアップされます。",
+            replacing: ["name": account.name]
+        )
+        alert.accessoryView = popup
+        alert.addButton(withTitle: L10n.text("settings-sharing.join", fallback: "参加"))
+        alert.addButton(withTitle: L10n.text("common.cancel", fallback: "キャンセル"))
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        do {
+            let group = try launcher.joinSettingsShare(
+                groupID: groups[popup.indexOfSelectedItem].id,
+                accountID: accountID
+            )
+            refreshUI()
+            showTransientStatus(
+                L10n.text(
+                    "settings-sharing.joined-success",
+                    fallback: "「{name}」の設定共有へ参加しました。ChatGPTの次回起動から反映されます。",
+                    replacing: ["name": group.name]
+                )
+            )
+        } catch {
+            presentError(
+                error,
+                title: L10n.text(
+                    "settings-sharing.error.title",
+                    fallback: "設定共有へ参加できませんでした"
+                )
+            )
+        }
+    }
+
+    private func presentCopySettings(destinationAccountID: UUID) {
+        guard let destination = launcher.accounts.first(where: { $0.id == destinationAccountID }) else {
+            presentError(ProfileManagerError.accountNotFound)
+            return
+        }
+        let sources = launcher.accounts.filter { $0.id != destinationAccountID }
+        guard !sources.isEmpty else {
+            presentError(
+                SettingsSharingError.sourceAndDestinationAreSame,
+                title: L10n.text(
+                    "settings-sharing.error.title",
+                    fallback: "設定をコピーできませんでした"
+                )
+            )
+            return
+        }
+
+        let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 420, height: 26))
+        popup.addItems(withTitles: sources.map(\.name))
+        let itemStack = makeManagedSettingCheckboxes(
+            defaults: [.instructions, .config]
+        )
+        let accessory = NSStackView()
+        accessory.orientation = .vertical
+        accessory.alignment = .leading
+        accessory.spacing = 10
+        accessory.addArrangedSubview(
+            NSTextField(labelWithString: L10n.text("settings-sharing.source", fallback: "コピー元"))
+        )
+        accessory.addArrangedSubview(popup)
+        accessory.addArrangedSubview(
+            NSTextField(labelWithString: L10n.text("settings-sharing.items", fallback: "コピーする設定"))
+        )
+        accessory.addArrangedSubview(itemStack.view)
+        accessory.setFrameSize(NSSize(width: 430, height: accessory.fittingSize.height))
+
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = L10n.text(
+            "settings-sharing.copy-title",
+            fallback: "別のプロファイルから設定をコピー"
+        )
+        alert.informativeText = L10n.text(
+            "settings-sharing.copy-message",
+            fallback: "コピー先「{name}」の同名設定はバックアップして置き換えます。auth.json、セッション、チャット、プロジェクトはコピーしません。config.tomlを選ぶ場合は内容を確認してください。",
+            replacing: ["name": destination.name]
+        )
+        alert.accessoryView = accessory
+        alert.addButton(withTitle: L10n.text("settings-sharing.copy-confirm", fallback: "コピー"))
+        alert.addButton(withTitle: L10n.text("common.cancel", fallback: "キャンセル"))
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        let selectedItems = Set(
+            itemStack.buttons.compactMap { setting, button in
+                button.state == .on ? setting : nil
+            }
+        )
+        guard !selectedItems.isEmpty else {
+            showTransientStatus(
+                L10n.text(
+                    "settings-sharing.selection-required",
+                    fallback: "コピーする設定を1つ以上選択してください。"
+                )
+            )
+            return
+        }
+
+        do {
+            let summary = try launcher.copySettings(
+                from: sources[popup.indexOfSelectedItem].id,
+                to: destinationAccountID,
+                items: selectedItems
+            )
+            showTransientStatus(
+                L10n.text(
+                    "settings-sharing.copied-success",
+                    fallback: "{count}項目を「{name}」へコピーしました。ChatGPTの次回起動から反映されます。",
+                    replacing: [
+                        "count": "\(summary.changedItems.count)",
+                        "name": destination.name
+                    ]
+                )
+            )
+        } catch {
+            presentError(
+                error,
+                title: L10n.text(
+                    "settings-sharing.error.title",
+                    fallback: "設定をコピーできませんでした"
+                )
+            )
+        }
+    }
+
+    private func leaveSettingsShare(accountID: UUID) {
+        do {
+            let group = try launcher.leaveSettingsShare(for: accountID)
+            refreshUI()
+            showTransientStatus(
+                L10n.text(
+                    "settings-sharing.left-success",
+                    fallback: "「{name}」の共有を解除し、現在の設定を保持しました。",
+                    replacing: ["name": group.name]
+                )
+            )
+        } catch {
+            presentError(
+                error,
+                title: L10n.text(
+                    "settings-sharing.error.title",
+                    fallback: "設定共有を解除できませんでした"
+                )
+            )
+        }
+    }
+
+    private func makeManagedSettingCheckboxes(
+        defaults: Set<ManagedSetting>
+    ) -> (view: NSStackView, buttons: [ManagedSetting: NSButton]) {
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 4
+        var buttons: [ManagedSetting: NSButton] = [:]
+        for setting in ManagedSetting.allCases {
+            let row = NSStackView()
+            row.orientation = .horizontal
+            row.alignment = .centerY
+            row.spacing = 4
+
+            let button = NSButton(
+                checkboxWithTitle: setting.displayName,
+                target: nil,
+                action: nil
+            )
+            button.state = defaults.contains(setting) ? .on : .off
+            row.addArrangedSubview(button)
+
+            let helpButton = NSButton(
+                image: NSImage(
+                    systemSymbolName: "questionmark.circle",
+                    accessibilityDescription: L10n.text(
+                        "settings-sharing.help-tooltip",
+                        fallback: "この設定項目の説明を表示"
+                    )
+                ) ?? NSImage(),
+                target: self,
+                action: #selector(showManagedSettingExplanation(_:))
+            )
+            helpButton.bezelStyle = .inline
+            helpButton.isBordered = false
+            helpButton.contentTintColor = .secondaryLabelColor
+            helpButton.imagePosition = .imageOnly
+            helpButton.identifier = NSUserInterfaceItemIdentifier(setting.rawValue)
+            helpButton.widthAnchor.constraint(equalToConstant: 20).isActive = true
+            helpButton.heightAnchor.constraint(equalToConstant: 20).isActive = true
+            helpButton.setContentHuggingPriority(.required, for: .horizontal)
+            helpButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+            helpButton.toolTip = L10n.text(
+                "settings-sharing.help-tooltip",
+                fallback: "この設定項目の説明を表示"
+            )
+            helpButton.setAccessibilityLabel(
+                L10n.text(
+                    "settings-sharing.help-accessibility-label",
+                    fallback: "{setting}の説明を表示",
+                    replacing: ["setting": setting.displayName]
+                )
+            )
+            row.addArrangedSubview(helpButton)
+
+            stack.addArrangedSubview(row)
+            buttons[setting] = button
+        }
+        return (stack, buttons)
+    }
+
+    @objc
+    private func showManagedSettingExplanation(_ sender: NSButton) {
+        guard
+            let rawValue = sender.identifier?.rawValue,
+            let setting = ManagedSetting(rawValue: rawValue)
+        else {
+            return
+        }
+
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = setting.displayName
+        var message = setting.explanation
+        if let warning = setting.warning {
+            message += "\n\n" + L10n.text(
+                "settings-sharing.explanation-caution",
+                fallback: "注意：{warning}",
+                replacing: ["warning": warning]
+            )
+        }
+        alert.informativeText = message
+        alert.addButton(withTitle: L10n.text("common.ok", fallback: "OK"))
+        alert.runModal()
     }
 
     private func presentProfileDirectoryChoice(
@@ -1864,6 +2351,64 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                 )
             },
             makeGuidePage(
+                title: L10n.text("guide.settings.title", fallback: "設定を共有・コピーする")
+            ) { content in
+                appendGuideText(
+                    content,
+                    L10n.text(
+                        "guide.settings.share-heading",
+                        fallback: "設定を共有\n"
+                    ),
+                    font: sectionFont,
+                    paragraphStyle: sectionParagraphStyle
+                )
+                appendGuideText(
+                    content,
+                    L10n.text(
+                        "guide.settings.share-body",
+                        fallback: "アカウント行の「設定」から「設定を共有」を選ぶと、複数のプロファイルを1つの共有グループへ追加できます。AGENTS.mdや選択した設定は共通ファイルを参照し、どのプロファイルから変更しても共有されます。反映はChatGPTの次回起動からです。\n\n"
+                    ),
+                    font: bodyFont,
+                    paragraphStyle: bodyParagraphStyle
+                )
+                appendGuideText(
+                    content,
+                    L10n.text(
+                        "guide.settings.copy-heading",
+                        fallback: "設定をコピー\n"
+                    ),
+                    font: sectionFont,
+                    paragraphStyle: sectionParagraphStyle
+                )
+                appendGuideText(
+                    content,
+                    L10n.text(
+                        "guide.settings.copy-body",
+                        fallback: "「設定をコピー」は1回だけの複製です。コピー元を後から変更しても、コピー先は変わりません。同名の設定はバックアップしてから置き換えます。\n\n"
+                    ),
+                    font: bodyFont,
+                    paragraphStyle: bodyParagraphStyle
+                )
+                appendGuideText(
+                    content,
+                    L10n.text(
+                        "guide.settings.scope-heading",
+                        fallback: "共有されないもの\n"
+                    ),
+                    font: sectionFont,
+                    paragraphStyle: sectionParagraphStyle
+                )
+                appendGuideText(
+                    content,
+                    L10n.text(
+                        "guide.settings.scope-body",
+                        fallback: "認証情報、セッション、ログ、SQLite索引、Cookie、ChatGPTのプロジェクトやチャットは共有・コピーしません。rulesは実行許可に影響するため、選択時に確認が必要です。設定変更の前には対象プロファイルのChatGPTを終了してください。"
+                    ),
+                    font: bodyFont,
+                    paragraphStyle: bodyParagraphStyle
+                )
+            },
+            makeGuidePage(
                 title: L10n.text("guide.mechanism.title", fallback: "仕組みと保存場所")
             ) { content in
                 appendGuideText(
@@ -1934,6 +2479,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                     L10n.text(
                         "guide.mechanism.location-tree",
                         fallback: "~/Library/Application Support/\n└── ChatGPT Profile Manager/\n    └── Profiles/\n        └── account-<表示名>-<短いID>/\n            ├── CodexHome/\n            └── ElectronUserData/"
+                    )
+                )
+                appendGuideText(
+                    content,
+                    L10n.text(
+                        "guide.mechanism.settings-heading",
+                        fallback: "設定共有の保存場所\n"
+                    ),
+                    font: sectionFont,
+                    paragraphStyle: sectionParagraphStyle
+                )
+                appendGuideText(
+                    content,
+                    L10n.text(
+                        "guide.mechanism.settings-body",
+                        fallback: "設定の共有グループとバックアップは、プロファイル本体とは別のアプリ管理領域に保存します。共有対象のAGENTS.mdやrulesはこの領域を参照します。認証情報、セッション、ログ、ElectronUserDataはこの機能の対象外です。\n\n"
+                    ),
+                    font: bodyFont,
+                    paragraphStyle: bodyParagraphStyle
+                )
+                appendGuideCode(
+                    content,
+                    L10n.text(
+                        "guide.mechanism.settings-tree",
+                        fallback: "~/Library/Application Support/\n└── ChatGPT Profile Manager/\n    ├── Profiles/\n    ├── Settings/\n    │   ├── SharedSettings/\n    │   └── Backups/\n    └── SettingsRegistry.json"
                     )
                 )
                 appendGuideText(
