@@ -8,6 +8,15 @@
 		<data>
 		akhXXw7JLdSfBW4kTrbmx2R1nCs=
 		</data>
+		<key>Resources/en.lproj/Localizable.strings</key>
+		<dict>
+			<key>hash</key>
+			<data>
+			Uy3fiQ+m4IEs3800RnyHarsz6Yc=
+			</data>
+			<key>optional</key>
+			<true/>
+		</dict>
 	</dict>
 	<key>files2</key>
 	<dict>
@@ -17,6 +26,15 @@
 			<data>
 			2qwJcVk/+cwgHUtQr/vxNebDfMdrHH3gCyjA62OA01Y=
 			</data>
+		</dict>
+		<key>Resources/en.lproj/Localizable.strings</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			a/qPqV5NcX+I6buP/BpB9XVr9WurtAd7Bql4MgGoLgI=
+			</data>
+			<key>optional</key>
+			<true/>
 		</dict>
 	</dict>
 	<key>rules</key>
