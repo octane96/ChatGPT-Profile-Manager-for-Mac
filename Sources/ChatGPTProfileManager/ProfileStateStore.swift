@@ -6,7 +6,7 @@ struct ProfileStateStore {
     private let accountsKey = "accountsV2"
     private let lastLaunchedAccountIDKey = "lastLaunchedAccountID"
     private let existingEnvironmentAccountIDKey = "existingEnvironmentAccountID"
-    private let hasUsedSwitcherSinceSetupKey = "hasUsedSwitcherSinceSetup"
+    private let hasShownMechanismGuideKey = "hasShownMechanismGuide"
 
     private let legacyLastLaunchedProfileKey = "lastLaunchedProfile"
     private let legacyExistingEnvironmentProfileKey = "existingEnvironmentProfile"
@@ -26,24 +26,27 @@ struct ProfileStateStore {
         return decoded
     }
 
+    /// Indicates whether this app has written an account registry before.
+    /// An empty saved registry is intentionally different from a first launch,
+    /// so recovery does not trigger the initial automatic registration again.
+    var hasSavedAccountState: Bool {
+        defaults.object(forKey: accountsKey) != nil
+    }
+
+    var hasShownMechanismGuide: Bool {
+        defaults.bool(forKey: hasShownMechanismGuideKey)
+    }
+
+    func markMechanismGuideShown() {
+        defaults.set(true, forKey: hasShownMechanismGuideKey)
+    }
+
     var lastLaunchedAccountID: UUID? {
         uuid(forKey: lastLaunchedAccountIDKey)
     }
 
     var existingEnvironmentAccountID: UUID? {
         uuid(forKey: existingEnvironmentAccountIDKey)
-    }
-
-    var hasUsedSwitcherSinceSetup: Bool {
-        guard existingEnvironmentAccountID != nil else {
-            return false
-        }
-
-        if defaults.object(forKey: hasUsedSwitcherSinceSetupKey) != nil {
-            return defaults.bool(forKey: hasUsedSwitcherSinceSetupKey)
-        }
-
-        return lastLaunchedAccountID != nil
     }
 
     func account(id: UUID) -> AccountProfile? {
@@ -53,27 +56,47 @@ struct ProfileStateStore {
     func validateNewAccountName(_ name: String) throws -> String {
         let normalizedName = try validatedName(name)
         guard !containsName(normalizedName, in: accounts) else {
-            throw SwitcherError.duplicateAccountName
+            throw ProfileManagerError.duplicateAccountName
         }
         return normalizedName
     }
 
     @discardableResult
-    func addAccount(named name: String, linkToExistingEnvironment: Bool) throws -> AccountProfile {
+    func addAccount(
+        named name: String,
+        linkToExistingEnvironment: Bool,
+        directoryName: String? = nil
+    ) throws -> AccountProfile {
         let normalizedName = try validateNewAccountName(name)
         var currentAccounts = accounts
 
         if linkToExistingEnvironment, existingEnvironmentAccountID != nil {
-            throw SwitcherError.existingEnvironmentAlreadyAssigned
+            throw ProfileManagerError.existingEnvironmentAlreadyAssigned
+        }
+        if linkToExistingEnvironment, directoryName != nil {
+            throw ProfileManagerError.invalidProfileDirectory
         }
 
-        let account = AccountProfile(name: normalizedName)
+        let normalizedDirectoryName: String?
+        if let directoryName {
+            let validatedDirectoryName = try validateProfileDirectoryName(directoryName)
+            guard !containsDirectoryName(validatedDirectoryName, in: currentAccounts) else {
+                throw ProfileManagerError.profileDirectoryAlreadyAssigned
+            }
+            normalizedDirectoryName = validatedDirectoryName
+        } else {
+            normalizedDirectoryName = nil
+        }
+
+        let account = AccountProfile(
+            name: normalizedName,
+            directoryName: normalizedDirectoryName
+        )
         currentAccounts.append(account)
         try saveAccounts(currentAccounts)
 
         if linkToExistingEnvironment {
             defaults.set(account.id.uuidString, forKey: existingEnvironmentAccountIDKey)
-            defaults.set(false, forKey: hasUsedSwitcherSinceSetupKey)
         }
 
         return account
@@ -84,10 +107,10 @@ struct ProfileStateStore {
         var currentAccounts = accounts
 
         guard let index = currentAccounts.firstIndex(where: { $0.id == id }) else {
-            throw SwitcherError.accountNotFound
+            throw ProfileManagerError.accountNotFound
         }
         guard !containsName(normalizedName, in: currentAccounts, excluding: id) else {
-            throw SwitcherError.duplicateAccountName
+            throw ProfileManagerError.duplicateAccountName
         }
 
         currentAccounts[index].name = normalizedName
@@ -97,10 +120,10 @@ struct ProfileStateStore {
     @discardableResult
     func removeAccount(id: UUID) throws -> AccountProfile {
         guard let account = account(id: id) else {
-            throw SwitcherError.accountNotFound
+            throw ProfileManagerError.accountNotFound
         }
         if existingEnvironmentAccountID == id {
-            throw SwitcherError.linkedAccountCannotBeDeleted
+            throw ProfileManagerError.linkedAccountCannotBeDeleted
         }
 
         var currentAccounts = accounts
@@ -117,7 +140,7 @@ struct ProfileStateStore {
     func moveAccount(id: UUID, toInsertionIndex insertionIndex: Int) throws {
         var currentAccounts = accounts
         guard let sourceIndex = currentAccounts.firstIndex(where: { $0.id == id }) else {
-            throw SwitcherError.accountNotFound
+            throw ProfileManagerError.accountNotFound
         }
 
         var destinationIndex = min(max(0, insertionIndex), currentAccounts.count)
@@ -133,35 +156,27 @@ struct ProfileStateStore {
 
     func setLastLaunchedAccount(_ account: AccountProfile) {
         defaults.set(account.id.uuidString, forKey: lastLaunchedAccountIDKey)
-        if existingEnvironmentAccountID != nil {
-            defaults.set(true, forKey: hasUsedSwitcherSinceSetupKey)
-        }
-    }
-
-    @discardableResult
-    func removeExistingEnvironmentAccount() throws -> AccountProfile? {
-        guard let existingID = existingEnvironmentAccountID else {
-            return nil
-        }
-
-        var currentAccounts = accounts
-        let removedAccount = currentAccounts.first(where: { $0.id == existingID })
-        currentAccounts.removeAll(where: { $0.id == existingID })
-        try saveAccounts(currentAccounts)
-
-        defaults.removeObject(forKey: existingEnvironmentAccountIDKey)
-        defaults.set(false, forKey: hasUsedSwitcherSinceSetupKey)
-        if lastLaunchedAccountID == existingID {
-            defaults.removeObject(forKey: lastLaunchedAccountIDKey)
-        }
-
-        return removedAccount
     }
 
     private func validatedName(_ name: String) throws -> String {
         let normalized = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalized.isEmpty, normalized.count <= 60 else {
-            throw SwitcherError.invalidAccountName
+            throw ProfileManagerError.invalidAccountName
+        }
+        return normalized
+    }
+
+    private func validateProfileDirectoryName(_ directoryName: String) throws -> String {
+        let normalized = directoryName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard
+            !normalized.isEmpty,
+            normalized.count <= 120,
+            normalized != ".",
+            normalized != "..",
+            !normalized.contains("/"),
+            !normalized.contains("\\")
+        else {
+            throw ProfileManagerError.invalidProfileDirectory
         }
         return normalized
     }
@@ -174,6 +189,18 @@ struct ProfileStateStore {
         accounts.contains { account in
             account.id != excludedID
                 && account.name.compare(name, options: [.caseInsensitive, .widthInsensitive]) == .orderedSame
+        }
+    }
+
+    private func containsDirectoryName(
+        _ directoryName: String,
+        in accounts: [AccountProfile]
+    ) -> Bool {
+        accounts.contains { account in
+            account.directoryName.compare(
+                directoryName,
+                options: [.caseInsensitive, .widthInsensitive]
+            ) == .orderedSame
         }
     }
 

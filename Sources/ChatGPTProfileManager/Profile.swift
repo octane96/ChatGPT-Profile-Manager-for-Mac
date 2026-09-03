@@ -12,7 +12,26 @@ struct AccountProfile: Codable, Equatable, Identifiable, Sendable {
     ) {
         self.id = id
         self.name = name
-        self.directoryName = directoryName ?? "account-\(id.uuidString.lowercased())"
+        self.directoryName = directoryName ?? Self.defaultDirectoryName(name: name, id: id)
+    }
+
+    private static func defaultDirectoryName(name: String, id: UUID) -> String {
+        let slug = name
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: " ", with: "-")
+            .unicodeScalars
+            .filter { scalar in
+                CharacterSet.alphanumerics.contains(scalar)
+                    || scalar == "-"
+                    || scalar == "_"
+            }
+            .map(String.init)
+            .joined()
+            .lowercased()
+
+        let readableSlug = String(slug.prefix(32)).trimmingCharacters(in: CharacterSet(charactersIn: "-_"))
+        let shortID = id.uuidString.replacingOccurrences(of: "-", with: "").prefix(8).lowercased()
+        return "account-\(readableSlug.isEmpty ? "profile" : readableSlug)-\(shortID)"
     }
 }
 
@@ -40,9 +59,16 @@ struct ProfilePaths: Equatable, Sendable {
     }
 }
 
-enum SwitcherLocations {
+struct IsolatedProfileCandidate: Equatable, Identifiable, Sendable {
+    let directoryName: String
+    let root: URL
+    let modifiedAt: Date?
+
+    var id: String { directoryName }
+}
+
+enum ProfileManagerLocations {
     private static let currentDirectoryName = "ChatGPT Profile Manager"
-    private static let legacyDirectoryName = "Codex Account Switcher"
 
     static func applicationSupportDirectory(
         fileManager: FileManager = .default,
@@ -57,118 +83,13 @@ enum SwitcherLocations {
         ).first {
             base = applicationSupportDirectory
         } else {
-            throw SwitcherError.applicationSupportUnavailable
+            throw ProfileManagerError.applicationSupportUnavailable
         }
 
-        let currentDirectory = base.appendingPathComponent(
+        return base.appendingPathComponent(
             currentDirectoryName,
             isDirectory: true
         )
-        let legacyDirectory = base.appendingPathComponent(
-            legacyDirectoryName,
-            isDirectory: true
-        )
-
-        return try migrateLegacyDirectory(
-            from: legacyDirectory,
-            to: currentDirectory,
-            fileManager: fileManager
-        )
-    }
-
-    private static func migrateLegacyDirectory(
-        from legacyDirectory: URL,
-        to currentDirectory: URL,
-        fileManager: FileManager
-    ) throws -> URL {
-        guard fileManager.fileExists(atPath: legacyDirectory.path) else {
-            return currentDirectory
-        }
-
-        guard fileManager.fileExists(atPath: currentDirectory.path) else {
-            do {
-                try fileManager.moveItem(at: legacyDirectory, to: currentDirectory)
-                return currentDirectory
-            } catch {
-                // Keep using the legacy directory if the move cannot be completed.
-                // This preserves access to existing profiles instead of risking data loss.
-                return legacyDirectory
-            }
-        }
-
-        guard isDirectory(currentDirectory, fileManager: fileManager) else {
-            return legacyDirectory
-        }
-        guard isDirectory(legacyDirectory, fileManager: fileManager) else {
-            return currentDirectory
-        }
-
-        try mergeDirectoryContents(
-            from: legacyDirectory,
-            to: currentDirectory,
-            fileManager: fileManager
-        )
-        return currentDirectory
-    }
-
-    private static func mergeDirectoryContents(
-        from sourceDirectory: URL,
-        to destinationDirectory: URL,
-        fileManager: FileManager
-    ) throws {
-        let entries = try fileManager.contentsOfDirectory(
-            at: sourceDirectory,
-            includingPropertiesForKeys: [.isDirectoryKey],
-            options: []
-        )
-
-        for sourceEntry in entries {
-            let destinationEntry = destinationDirectory.appendingPathComponent(
-                sourceEntry.lastPathComponent,
-                isDirectory: isDirectory(sourceEntry, fileManager: fileManager)
-            )
-
-            guard fileManager.fileExists(atPath: destinationEntry.path) else {
-                try fileManager.moveItem(at: sourceEntry, to: destinationEntry)
-                continue
-            }
-
-            guard
-                isDirectory(sourceEntry, fileManager: fileManager),
-                isDirectory(destinationEntry, fileManager: fileManager)
-            else {
-                // Never overwrite a same-named file or profile. Leave it in the
-                // legacy directory so the user can compare or recover it manually.
-                continue
-            }
-
-            try mergeDirectoryContents(
-                from: sourceEntry,
-                to: destinationEntry,
-                fileManager: fileManager
-            )
-        }
-
-        if try fileManager.contentsOfDirectory(
-            at: sourceDirectory,
-            includingPropertiesForKeys: nil,
-            options: []
-        ).isEmpty {
-            try fileManager.removeItem(at: sourceDirectory)
-        }
-    }
-
-    private static func isDirectory(
-        _ url: URL,
-        fileManager: FileManager
-    ) -> Bool {
-        guard
-            let values = try? url.resourceValues(forKeys: [.isDirectoryKey]),
-            let isDirectory = values.isDirectory
-        else {
-            return false
-        }
-        return isDirectory
     }
 }
 
@@ -199,7 +120,7 @@ enum ProfileLaunchMode: Equatable, Sendable {
     case isolated(ProfilePaths)
 }
 
-enum SwitcherError: LocalizedError, Equatable {
+enum ProfileManagerError: LocalizedError, Equatable {
     case applicationSupportUnavailable
     case codexAppNotFound
     case codexDidNotQuit
@@ -208,6 +129,9 @@ enum SwitcherError: LocalizedError, Equatable {
     case linkedAccountCannotBeDeleted
     case invalidAccountName
     case duplicateAccountName
+    case invalidProfileDirectory
+    case profileDirectoryAlreadyAssigned
+    case profileDirectoryNotFound
     case existingEnvironmentAlreadyAssigned
     case launchFailed(Int32)
 
@@ -229,6 +153,12 @@ enum SwitcherError: LocalizedError, Equatable {
             return "アカウント名を1文字以上60文字以内で入力してください。"
         case .duplicateAccountName:
             return "同じ名前のアカウントがすでに登録されています。別の名前を入力してください。"
+        case .invalidProfileDirectory:
+            return "分離プロファイルの保存先名が無効です。"
+        case .profileDirectoryAlreadyAssigned:
+            return "その分離プロファイルは、すでに別のアカウントへ紐づいています。"
+        case .profileDirectoryNotFound:
+            return "選択した分離プロファイルが見つかりませんでした。"
         case .existingEnvironmentAlreadyAssigned:
             return "既存のCodex環境は、すでに別のアカウントへ固定されています。"
         case let .launchFailed(status):

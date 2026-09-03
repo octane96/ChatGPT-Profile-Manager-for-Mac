@@ -3,26 +3,26 @@
 import PackageDescription
 
 let package = Package(
-    name: "CodexAccountSwitcher",
+    name: "ChatGPTProfileManager",
     platforms: [
         .macOS(.v14)
     ],
     products: [
         .executable(
-            name: "CodexAccountSwitcher",
-            targets: ["CodexAccountSwitcher"]
+            name: "ChatGPTProfileManager",
+            targets: ["ChatGPTProfileManager"]
         )
     ],
     targets: [
         .executableTarget(
-            name: "CodexAccountSwitcher",
+            name: "ChatGPTProfileManager",
             linkerSettings: [
                 .linkedFramework("AppKit")
             ]
         ),
         .testTarget(
-            name: "CodexAccountSwitcherTests",
-            dependencies: ["CodexAccountSwitcher"]
+            name: "ChatGPTProfileManagerTests",
+            dependencies: ["ChatGPTProfileManager"]
         )
     ]
 )

@@ -36,8 +36,8 @@ swift build \
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
 mkdir -p "$APP_BUNDLE/Contents/Resources"
 
-cp "$BUILD_DIR/release/CodexAccountSwitcher" \
-  "$APP_BUNDLE/Contents/MacOS/CodexAccountSwitcher"
+cp "$BUILD_DIR/release/ChatGPTProfileManager" \
+  "$APP_BUNDLE/Contents/MacOS/ChatGPTProfileManager"
 cp "$PROJECT_DIR/Resources/Info.plist" "$APP_BUNDLE/Contents/Info.plist"
 cp "$PROJECT_DIR/Resources/PkgInfo" "$APP_BUNDLE/Contents/PkgInfo"
 cp "$PROJECT_DIR/Resources/AppIcon.icns" \

@@ -5,9 +5,9 @@
     <key>CFBundleDisplayName</key>
     <string>ChatGPT Profile Manager</string>
     <key>CFBundleExecutable</key>
-    <string>CodexAccountSwitcher</string>
+    <string>ChatGPTProfileManager</string>
     <key>CFBundleIdentifier</key>
-    <string>com.local.codex-account-switcher</string>
+    <string>com.local.chatgpt-profile-manager</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon.icns</string>
     <key>CFBundleInfoDictionaryVersion</key>
