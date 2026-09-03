@@ -8,7 +8,6 @@ final class CodexLauncher {
     private let fileManager: FileManager
     private let workspace: NSWorkspace
     private let stateStore: ProfileStateStore
-    private let quitTimeoutNanoseconds: UInt64
     private let homeDirectory: URL
 
     private struct AuthDocument: Decodable {
@@ -44,13 +43,11 @@ final class CodexLauncher {
         fileManager: FileManager = .default,
         workspace: NSWorkspace = .shared,
         stateStore: ProfileStateStore = ProfileStateStore(),
-        quitTimeoutNanoseconds: UInt64 = 10_000_000_000,
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
     ) {
         self.fileManager = fileManager
         self.workspace = workspace
         self.stateStore = stateStore
-        self.quitTimeoutNanoseconds = quitTimeoutNanoseconds
         self.homeDirectory = homeDirectory
     }
 
@@ -92,7 +89,10 @@ final class CodexLauncher {
             return nil
         }
 
-        let name = existingEnvironmentEmail ?? "既存のChatGPT環境"
+        let name = existingEnvironmentEmail ?? L10n.text(
+            "account.default-existing-environment-name",
+            fallback: "既存のChatGPT環境"
+        )
         return try addAccount(
             named: name,
             linkToExistingEnvironment: true
@@ -195,9 +195,21 @@ final class CodexLauncher {
     }
 
     var isCodexRunning: Bool {
-        !NSRunningApplication.runningApplications(
-            withBundleIdentifier: Self.codexBundleIdentifier
-        ).isEmpty
+        !runningChatGPTApplications.isEmpty
+    }
+
+    var runningAccountIDs: Set<UUID> {
+        // An instance not started by this version of the manager is
+        // conservatively treated as the default, existing environment.
+        stateStore.runningAccountIDs(
+            processIdentifiers: Set(
+                runningChatGPTApplications.map(\.processIdentifier)
+            )
+        )
+    }
+
+    func isAccountRunning(id: UUID) -> Bool {
+        runningAccountIDs.contains(id)
     }
 
     @discardableResult
@@ -242,7 +254,7 @@ final class CodexLauncher {
         if stateStore.existingEnvironmentAccountID == id {
             throw ProfileManagerError.linkedAccountCannotBeDeleted
         }
-        guard !isCodexRunning else {
+        guard !isAccountRunning(id: id) else {
             throw ProfileManagerError.codexMustBeClosed
         }
 
@@ -266,15 +278,16 @@ final class CodexLauncher {
         return ProfilePaths(profile: account, baseDirectory: baseDirectory).codexHome
     }
 
-    func switchTo(accountID: UUID) async throws {
+    func open(accountID: UUID) async throws {
         guard let account = stateStore.account(id: accountID) else {
             throw ProfileManagerError.accountNotFound
+        }
+        guard !isAccountRunning(id: accountID) else {
+            throw ProfileManagerError.profileAlreadyRunning
         }
         guard let appURL = locateCodexApp() else {
             throw ProfileManagerError.codexAppNotFound
         }
-
-        try await terminateRunningCodexInstances()
 
         let launchMode: ProfileLaunchMode
         if account.id == stateStore.existingEnvironmentAccountID {
@@ -288,8 +301,54 @@ final class CodexLauncher {
             launchMode = .isolated(paths)
         }
 
-        try await launchCodex(appURL: appURL, mode: launchMode)
+        let processIdentifier = try await launchCodex(appURL: appURL, mode: launchMode)
+        stateStore.setRunningProfileInstance(
+            accountID: account.id,
+            processIdentifier: processIdentifier
+        )
         stateStore.setLastLaunchedAccount(account)
+    }
+
+    func quit(accountID: UUID) async throws {
+        guard stateStore.account(id: accountID) != nil else {
+            throw ProfileManagerError.accountNotFound
+        }
+
+        let applications = runningChatGPTApplications
+        let processIdentifiers = Set(applications.map(\.processIdentifier))
+        guard let processIdentifier = stateStore.runningProcessIdentifier(
+            for: accountID,
+            processIdentifiers: processIdentifiers
+        ) else {
+            if !stateStore.runningAccountIDs(
+                processIdentifiers: processIdentifiers
+            ).contains(accountID) {
+                stateStore.removeRunningProfileInstance(accountID: accountID)
+                return
+            }
+            throw ProfileManagerError.runningProfileCannotBeIdentified
+        }
+
+        guard let application = applications.first(where: {
+            $0.processIdentifier == processIdentifier
+        }) else {
+            stateStore.removeRunningProfileInstance(accountID: accountID)
+            return
+        }
+
+        let acceptedQuitRequest = application.terminate()
+        if !acceptedQuitRequest && !application.isTerminated {
+            throw ProfileManagerError.chatGPTDidNotQuit
+        }
+
+        for _ in 0..<80 where !application.isTerminated {
+            try await Task.sleep(for: .milliseconds(125))
+        }
+        guard application.isTerminated else {
+            throw ProfileManagerError.chatGPTDidNotQuit
+        }
+
+        stateStore.removeRunningProfileInstance(accountID: accountID)
     }
 
     private func locateCodexApp() -> URL? {
@@ -339,50 +398,37 @@ final class CodexLauncher {
         return email
     }
 
-    private func terminateRunningCodexInstances() async throws {
-        let runningApps = NSRunningApplication.runningApplications(
+    private var runningChatGPTApplications: [NSRunningApplication] {
+        NSRunningApplication.runningApplications(
             withBundleIdentifier: Self.codexBundleIdentifier
-        )
-
-        guard !runningApps.isEmpty else {
-            return
-        }
-
-        for app in runningApps where !app.isTerminated {
-            _ = app.terminate()
-        }
-
-        let pollInterval: UInt64 = 100_000_000
-        var waited: UInt64 = 0
-        while runningApps.contains(where: { !$0.isTerminated }) {
-            guard waited < quitTimeoutNanoseconds else {
-                throw ProfileManagerError.codexDidNotQuit
-            }
-            try await Task.sleep(nanoseconds: pollInterval)
-            waited += pollInterval
-        }
+        ).filter { !$0.isTerminated }
     }
 
-    private func launchCodex(appURL: URL, mode: ProfileLaunchMode) async throws {
+    private func launchCodex(
+        appURL: URL,
+        mode: ProfileLaunchMode
+    ) async throws -> Int32 {
         let spec = CodexLaunchSpec(appURL: appURL, mode: mode)
-        let process = Process()
-        process.executableURL = spec.executableURL
-        process.arguments = spec.arguments
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.createsNewApplicationInstance = true
+        configuration.arguments = spec.arguments
+        configuration.environment = spec.environment
 
-        let status = try await withCheckedThrowingContinuation { continuation in
-            process.terminationHandler = { completedProcess in
-                continuation.resume(returning: completedProcess.terminationStatus)
+        return try await withCheckedThrowingContinuation { continuation in
+            workspace.openApplication(
+                at: spec.applicationURL,
+                configuration: configuration
+            ) { application, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else if let application {
+                    continuation.resume(returning: application.processIdentifier)
+                } else {
+                    continuation.resume(
+                        throwing: ProfileManagerError.launchFailed(-1)
+                    )
+                }
             }
-            do {
-                try process.run()
-            } catch {
-                process.terminationHandler = nil
-                continuation.resume(throwing: error)
-            }
-        }
-
-        guard status == 0 else {
-            throw ProfileManagerError.launchFailed(status)
         }
     }
 }

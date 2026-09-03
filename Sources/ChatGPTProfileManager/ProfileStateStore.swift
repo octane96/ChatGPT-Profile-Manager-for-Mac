@@ -1,5 +1,10 @@
 import Foundation
 
+struct RunningProfileInstance: Codable, Equatable, Sendable {
+    let accountID: UUID
+    let processIdentifier: Int32
+}
+
 struct ProfileStateStore {
     private let defaults: UserDefaults
 
@@ -7,6 +12,7 @@ struct ProfileStateStore {
     private let lastLaunchedAccountIDKey = "lastLaunchedAccountID"
     private let existingEnvironmentAccountIDKey = "existingEnvironmentAccountID"
     private let hasShownMechanismGuideKey = "hasShownMechanismGuide"
+    private let runningProfileInstancesKey = "runningProfileInstances"
 
     private let legacyLastLaunchedProfileKey = "lastLaunchedProfile"
     private let legacyExistingEnvironmentProfileKey = "existingEnvironmentProfile"
@@ -47,6 +53,99 @@ struct ProfileStateStore {
 
     var existingEnvironmentAccountID: UUID? {
         uuid(forKey: existingEnvironmentAccountIDKey)
+    }
+
+    func activeRunningProfileInstances(
+        processIdentifiers: Set<Int32>
+    ) -> [UUID: Int32] {
+        let savedInstances = runningProfileInstances
+        var activeInstances: [UUID: Int32] = [:]
+
+        for instance in savedInstances where
+            processIdentifiers.contains(instance.processIdentifier)
+                && account(id: instance.accountID) != nil
+        {
+            activeInstances[instance.accountID] = instance.processIdentifier
+        }
+
+        let normalizedInstances = activeInstances
+            .map {
+                RunningProfileInstance(
+                    accountID: $0.key,
+                    processIdentifier: $0.value
+                )
+            }
+            .sorted { $0.accountID.uuidString < $1.accountID.uuidString }
+        if normalizedInstances != savedInstances.sorted(
+            by: { $0.accountID.uuidString < $1.accountID.uuidString }
+        ) {
+            saveRunningProfileInstances(normalizedInstances)
+        }
+
+        return activeInstances
+    }
+
+    func runningAccountIDs(processIdentifiers: Set<Int32>) -> Set<UUID> {
+        let assignedInstances = activeRunningProfileInstances(
+            processIdentifiers: processIdentifiers
+        )
+        var accountIDs = Set(assignedInstances.keys)
+
+        if let existingEnvironmentAccountID {
+            let assignedProcessIdentifiers = Set(assignedInstances.values)
+            if !processIdentifiers.subtracting(assignedProcessIdentifiers).isEmpty {
+                accountIDs.insert(existingEnvironmentAccountID)
+            }
+        }
+
+        return accountIDs
+    }
+
+    /// Resolves the one running process that belongs to an account.
+    ///
+    /// Isolated profiles and manager-launched existing environments use the
+    /// saved process assignment. An existing environment that was launched
+    /// outside the manager can be resolved only when exactly one unassigned
+    /// ChatGPT process is running. This prevents quitting the wrong instance.
+    func runningProcessIdentifier(
+        for accountID: UUID,
+        processIdentifiers: Set<Int32>
+    ) -> Int32? {
+        let assignedInstances = activeRunningProfileInstances(
+            processIdentifiers: processIdentifiers
+        )
+        if let assignedProcessIdentifier = assignedInstances[accountID] {
+            return assignedProcessIdentifier
+        }
+
+        guard existingEnvironmentAccountID == accountID else {
+            return nil
+        }
+
+        let unassignedProcessIdentifiers = processIdentifiers.subtracting(
+            Set(assignedInstances.values)
+        )
+        guard unassignedProcessIdentifiers.count == 1 else {
+            return nil
+        }
+        return unassignedProcessIdentifiers.first
+    }
+
+    func setRunningProfileInstance(accountID: UUID, processIdentifier: Int32) {
+        var instances = runningProfileInstances.filter { $0.accountID != accountID }
+        instances.append(
+            RunningProfileInstance(
+                accountID: accountID,
+                processIdentifier: processIdentifier
+            )
+        )
+        saveRunningProfileInstances(instances)
+    }
+
+    func removeRunningProfileInstance(accountID: UUID) {
+        saveRunningProfileInstances(
+            runningProfileInstances.filter { $0.accountID != accountID }
+        )
     }
 
     func account(id: UUID) -> AccountProfile? {
@@ -133,6 +232,7 @@ struct ProfileStateStore {
         if lastLaunchedAccountID == id {
             defaults.removeObject(forKey: lastLaunchedAccountIDKey)
         }
+        removeRunningProfileInstance(accountID: id)
 
         return account
     }
@@ -216,6 +316,26 @@ struct ProfileStateStore {
         defaults.set(data, forKey: accountsKey)
     }
 
+    private var runningProfileInstances: [RunningProfileInstance] {
+        guard
+            let data = defaults.data(forKey: runningProfileInstancesKey),
+            let instances = try? JSONDecoder().decode(
+                [RunningProfileInstance].self,
+                from: data
+            )
+        else {
+            return []
+        }
+        return instances
+    }
+
+    private func saveRunningProfileInstances(_ instances: [RunningProfileInstance]) {
+        guard let data = try? JSONEncoder().encode(instances) else {
+            return
+        }
+        defaults.set(data, forKey: runningProfileInstancesKey)
+    }
+
     private func migrateLegacyStateIfNeeded() {
         guard defaults.object(forKey: accountsKey) == nil else {
             return
@@ -229,8 +349,14 @@ struct ProfileStateStore {
             return
         }
 
-        let firstAccount = AccountProfile(name: "アカウント1", directoryName: "personal")
-        let secondAccount = AccountProfile(name: "アカウント2", directoryName: "work")
+        let firstAccount = AccountProfile(
+            name: L10n.text("account.legacy-first-name", fallback: "アカウント1"),
+            directoryName: "personal"
+        )
+        let secondAccount = AccountProfile(
+            name: L10n.text("account.legacy-second-name", fallback: "アカウント2"),
+            directoryName: "work"
+        )
         let migratedAccounts = [firstAccount, secondAccount]
 
         guard let data = try? JSONEncoder().encode(migratedAccounts) else {

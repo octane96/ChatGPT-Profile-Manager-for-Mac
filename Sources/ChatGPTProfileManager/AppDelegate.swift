@@ -62,6 +62,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     )
     private var window: NSWindow?
     private var guideWindow: NSWindow?
+    private var settingsWindow: NSWindow?
     private var guidePages: [NSAttributedString] = []
     private var guidePageIndex = 0
     private var guideDotButtons: [NSButton] = []
@@ -78,10 +79,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     private var tableHeightConstraint: NSLayoutConstraint?
     private var addButton: NSButton?
     private var revealButton: NSButton?
+    private var settingsButton: NSButton?
+    private weak var settingsLanguagePopup: NSPopUpButton?
     private var storageChoiceButtons: [NSButton] = []
     private var usageByAccountID: [UUID: AccountUsageSnapshot] = [:]
     private var usageRefreshTask: Task<Void, Never>?
-    private var isSwitching = false {
+    private var isRebuildingInterface = false
+    private var isLaunching = false {
         didSet {
             updateControlAvailability()
         }
@@ -93,6 +97,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         configureWindow()
         refreshUI()
         refreshUsage()
+        let workspaceNotifications = NSWorkspace.shared.notificationCenter
+        workspaceNotifications.addObserver(
+            self,
+            selector: #selector(chatGPTApplicationStateChanged(_:)),
+            name: NSWorkspace.didLaunchApplicationNotification,
+            object: nil
+        )
+        workspaceNotifications.addObserver(
+            self,
+            selector: #selector(chatGPTApplicationStateChanged(_:)),
+            name: NSWorkspace.didTerminateApplicationNotification,
+            object: nil
+        )
         showMainWindow()
 
         DispatchQueue.main.async { [weak self] in
@@ -105,10 +122,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         refreshUsage()
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+    }
+
+    @objc
+    private func chatGPTApplicationStateChanged(_ notification: Notification) {
+        guard
+            let application = notification.userInfo?[
+                NSWorkspace.applicationUserInfoKey
+            ] as? NSRunningApplication,
+            application.bundleIdentifier == CodexLauncher.codexBundleIdentifier
+        else {
+            return
+        }
+
+        refreshUI()
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(
         _ sender: NSApplication
     ) -> Bool {
-        true
+        !isRebuildingInterface
     }
 
     func applicationShouldHandleReopen(
@@ -121,9 +156,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
 
     func windowWillClose(_ notification: Notification) {
         guard
-            let closingWindow = notification.object as? NSWindow,
-            closingWindow === guideWindow
+            let closingWindow = notification.object as? NSWindow
         else {
+            return
+        }
+
+        if closingWindow === settingsWindow {
+            settingsWindow = nil
+            settingsLanguagePopup = nil
+            return
+        }
+
+        guard closingWindow === guideWindow else {
             return
         }
 
@@ -142,13 +186,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         mainMenu.addItem(applicationMenuItem)
         let applicationMenu = NSMenu(title: "ChatGPT Profile Manager")
         applicationMenu.addItem(
-            withTitle: "ChatGPT Profile Managerについて",
+            withTitle: L10n.text(
+                "menu.about",
+                fallback: "ChatGPT Profile Managerについて"
+            ),
             action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
             keyEquivalent: ""
         )
         applicationMenu.addItem(.separator())
         applicationMenu.addItem(
-            withTitle: "ChatGPT Profile Managerを終了",
+            withTitle: L10n.text(
+                "menu.quit",
+                fallback: "ChatGPT Profile Managerを終了"
+            ),
             action: #selector(NSApplication.terminate(_:)),
             keyEquivalent: "q"
         )
@@ -156,14 +206,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
 
         let windowMenuItem = NSMenuItem()
         mainMenu.addItem(windowMenuItem)
-        let windowMenu = NSMenu(title: "ウィンドウ")
+        let windowMenu = NSMenu(
+            title: L10n.text("menu.window", fallback: "ウィンドウ")
+        )
         windowMenu.addItem(
-            withTitle: "ウィンドウを閉じる",
+            withTitle: L10n.text("menu.window.close", fallback: "ウィンドウを閉じる"),
             action: #selector(NSWindow.performClose(_:)),
             keyEquivalent: "w"
         )
         windowMenu.addItem(
-            withTitle: "しまう",
+            withTitle: L10n.text("menu.window.minimize", fallback: "しまう"),
             action: #selector(NSWindow.performMiniaturize(_:)),
             keyEquivalent: "m"
         )
@@ -228,7 +280,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         heroLabels.addArrangedSubview(titleLabel)
 
         let descriptionLabel = NSTextField(
-            wrappingLabelWithString: "ChatGPTアカウントごとに保存先を分け、ChatGPTを安全に切り替えます。"
+            wrappingLabelWithString: L10n.text(
+                "main.subtitle",
+                fallback: "ChatGPTアカウントごとに保存先を分け、複数のプロファイルを並列で起動します。"
+            )
         )
         descriptionLabel.font = .systemFont(ofSize: 13)
         descriptionLabel.textColor = .secondaryLabelColor
@@ -246,7 +301,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             .withAlphaComponent(0.22)
             .cgColor
         launchStatusCard.translatesAutoresizingMaskIntoConstraints = false
-        launchStatusCard.setAccessibilityLabel("最後に起動したアカウント")
+        launchStatusCard.setAccessibilityLabel(
+            L10n.text(
+                "last-launched.accessibility-label",
+                fallback: "最後に起動したアカウント"
+            )
+        )
 
         let launchStatusStack = NSStackView()
         launchStatusStack.orientation = .horizontal
@@ -264,7 +324,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         let launchStatusIcon = NSImageView(
             image: NSImage(
                 systemSymbolName: "clock.arrow.circlepath",
-                accessibilityDescription: "最後に起動"
+                accessibilityDescription: L10n.text(
+                    "last-launched.title",
+                    fallback: "最後に起動"
+                )
             ) ?? NSImage()
         )
         launchStatusIcon.symbolConfiguration = NSImage.SymbolConfiguration(
@@ -285,7 +348,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         launchStatusLabels.alignment = .leading
         launchStatusLabels.spacing = 2
 
-        let launchStatusTitleLabel = NSTextField(labelWithString: "最後に起動")
+        let launchStatusTitleLabel = NSTextField(
+            labelWithString: L10n.text(
+                "last-launched.title",
+                fallback: "最後に起動"
+            )
+        )
         launchStatusTitleLabel.font = .systemFont(ofSize: 11, weight: .semibold)
         launchStatusTitleLabel.textColor = .secondaryLabelColor
         launchStatusLabels.addArrangedSubview(launchStatusTitleLabel)
@@ -315,7 +383,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         accountHeader.alignment = .centerY
         accountHeader.translatesAutoresizingMaskIntoConstraints = false
 
-        let accountHeaderLabel = NSTextField(labelWithString: "アカウント")
+        let accountHeaderLabel = NSTextField(
+            labelWithString: L10n.text("accounts.title", fallback: "アカウント")
+        )
         accountHeaderLabel.font = .systemFont(ofSize: 17, weight: .semibold)
         accountHeader.addArrangedSubview(accountHeaderLabel)
 
@@ -330,14 +400,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         accountHeader.addArrangedSubview(headerSpacer)
 
         let addButton = NSButton(
-            title: "アカウントを追加",
+            title: L10n.text("accounts.add", fallback: "アカウントを追加"),
             target: self,
             action: #selector(addAccount)
         )
         addButton.bezelStyle = .rounded
         addButton.controlSize = .large
         addButton.keyEquivalent = "+"
-        addButton.setAccessibilityLabel("アカウントを追加")
+        addButton.setAccessibilityLabel(
+            L10n.text("accounts.add", fallback: "アカウントを追加")
+        )
         accountHeader.addArrangedSubview(addButton)
         mainStack.addArrangedSubview(accountHeader)
         accountHeader.widthAnchor.constraint(equalTo: mainStack.widthAnchor).isActive = true
@@ -350,7 +422,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         tableView.selectionHighlightStyle = .none
         tableView.backgroundColor = .clear
         tableView.gridStyleMask = []
-        tableView.setAccessibilityLabel("登録済みアカウント")
+        tableView.setAccessibilityLabel(
+            L10n.text(
+                "accounts.registered.accessibility-label",
+                fallback: "登録済みアカウント"
+            )
+        )
         tableView.dataSource = self
         tableView.delegate = self
         tableView.registerForDraggedTypes([accountPasteboardType])
@@ -396,7 +473,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         mainStack.addArrangedSubview(separator)
         separator.widthAnchor.constraint(equalTo: mainStack.widthAnchor).isActive = true
 
-        let managementHeader = NSTextField(labelWithString: "管理")
+        let managementHeader = NSTextField(
+            labelWithString: L10n.text("management.title", fallback: "管理")
+        )
         managementHeader.font = .systemFont(ofSize: 12, weight: .semibold)
         managementHeader.alignment = .left
         managementHeader.textColor = .secondaryLabelColor
@@ -408,8 +487,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         utilityButtons.spacing = 12
         utilityButtons.translatesAutoresizingMaskIntoConstraints = false
 
+        let settingsButton = NSButton(
+            title: L10n.text("management.settings", fallback: "設定"),
+            target: self,
+            action: #selector(showSettings)
+        )
+        settingsButton.bezelStyle = .rounded
+        settingsButton.controlSize = .regular
+        settingsButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 30).isActive = true
+        settingsButton.contentTintColor = .controlAccentColor
+        settingsButton.image = NSImage(
+            systemSymbolName: "gearshape",
+            accessibilityDescription: nil
+        )
+        settingsButton.imagePosition = .imageLeading
+        settingsButton.setAccessibilityLabel(
+            L10n.text(
+                "management.settings.accessibility-label",
+                fallback: "アプリの設定を開く"
+            )
+        )
+
         let revealButton = NSButton(
-            title: "保存先を開く",
+            title: L10n.text("management.open-storage", fallback: "保存先を開く"),
             target: self,
             action: #selector(revealProfiles)
         )
@@ -417,10 +517,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         revealButton.controlSize = .regular
         revealButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 30).isActive = true
         revealButton.contentTintColor = .controlAccentColor
-        revealButton.setAccessibilityLabel("プロファイル保存先を開く")
+        revealButton.setAccessibilityLabel(
+            L10n.text(
+                "management.open-storage.accessibility-label",
+                fallback: "プロファイル保存先を開く"
+            )
+        )
 
         let guideButton = NSButton(
-            title: "仕組みを見る",
+            title: L10n.text("management.show-guide", fallback: "仕組みを見る"),
             target: self,
             action: #selector(showMechanismGuide)
         )
@@ -428,13 +533,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         guideButton.controlSize = .regular
         guideButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 30).isActive = true
         guideButton.contentTintColor = .controlAccentColor
-        guideButton.setAccessibilityLabel("このアプリの仕組みを見る")
+        guideButton.setAccessibilityLabel(
+            L10n.text(
+                "management.show-guide.accessibility-label",
+                fallback: "このアプリの仕組みを見る"
+            )
+        )
 
+        utilityButtons.addArrangedSubview(settingsButton)
         utilityButtons.addArrangedSubview(revealButton)
         utilityButtons.addArrangedSubview(guideButton)
         mainStack.addArrangedSubview(utilityButtons)
 
         self.revealButton = revealButton
+        self.settingsButton = settingsButton
 
         self.window = window
     }
@@ -446,7 +558,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
 
     private func refreshUI() {
         let accounts = launcher.accounts
-        accountCountLabel?.stringValue = accounts.isEmpty ? "未登録" : "\(accounts.count)件"
+        accountCountLabel?.stringValue = L10n.accountCount(accounts.count)
 
         updateLaunchStatus()
         statusLabel?.stringValue = ""
@@ -458,16 +570,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     }
 
     private func updateLaunchStatus() {
-        launchStatusTitleLabel?.stringValue = "最後に起動"
+        launchStatusTitleLabel?.stringValue = L10n.text(
+            "last-launched.title",
+            fallback: "最後に起動"
+        )
         if let lastAccount = launcher.lastLaunchedAccount {
             let environment = lastAccount.id == launcher.existingEnvironmentAccount?.id
-                ? "既存環境"
-                : "分離プロファイル"
-            launchStatusDetailLabel?.stringValue = "\(lastAccount.name)（\(environment)）"
+                ? L10n.text("profile.existing", fallback: "既存環境")
+                : L10n.text("profile.isolated", fallback: "分離プロファイル")
+            launchStatusDetailLabel?.stringValue = L10n.text(
+                "last-launched.detail",
+                fallback: "{name}（{environment}）",
+                replacing: [
+                    "name": lastAccount.name,
+                    "environment": environment
+                ]
+            )
         } else if launcher.accounts.isEmpty {
-            launchStatusDetailLabel?.stringValue = "アカウントを追加するとここに表示されます"
+            launchStatusDetailLabel?.stringValue = L10n.text(
+                "last-launched.empty",
+                fallback: "アカウントを追加するとここに表示されます"
+            )
         } else {
-            launchStatusDetailLabel?.stringValue = "このアプリから起動したアカウントはありません"
+            launchStatusDetailLabel?.stringValue = L10n.text(
+                "last-launched.none",
+                fallback: "このアプリから起動したアカウントはありません"
+            )
         }
     }
 
@@ -520,9 +648,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     }
 
     private func updateControlAvailability() {
-        addButton?.isEnabled = !isSwitching
-        tableView?.isEnabled = !isSwitching
-        revealButton?.isEnabled = !isSwitching
+        addButton?.isEnabled = !isLaunching
+        tableView?.isEnabled = !isLaunching
+        revealButton?.isEnabled = !isLaunching
+        settingsButton?.isEnabled = !isLaunching
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int {
@@ -581,7 +710,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         let dragHandle = NSImageView(
             image: NSImage(
                 systemSymbolName: "line.3.horizontal",
-                accessibilityDescription: "ドラッグして並び替え"
+                accessibilityDescription: L10n.text(
+                    "account.reorder",
+                    fallback: "ドラッグして並び替え"
+                )
             ) ?? NSImage()
         )
         dragHandle.symbolConfiguration = NSImage.SymbolConfiguration(
@@ -589,8 +721,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             weight: .medium
         )
         dragHandle.contentTintColor = .secondaryLabelColor
-        dragHandle.toolTip = "ドラッグして並び替え"
-        dragHandle.setAccessibilityLabel("\(account.name)をドラッグして並び替え")
+        dragHandle.toolTip = L10n.text(
+            "account.reorder",
+            fallback: "ドラッグして並び替え"
+        )
+        dragHandle.setAccessibilityLabel(
+            L10n.text(
+                "account.reorder.accessibility-label",
+                fallback: "{name}をドラッグして並び替え",
+                replacing: ["name": account.name]
+            )
+        )
         dragHandle.translatesAutoresizingMaskIntoConstraints = false
         dragContainer.addSubview(dragHandle)
         NSLayoutConstraint.activate([
@@ -608,6 +749,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         labels.addArrangedSubview(nameLabel)
 
         let isExisting = account.id == launcher.existingEnvironmentAccount?.id
+        let isRunning = launcher.isAccountRunning(id: account.id)
         let usageSnapshot = usageByAccountID[account.id]
         let metadataStack = NSStackView()
         metadataStack.orientation = .horizontal
@@ -615,13 +757,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         metadataStack.spacing = 6
 
         let badge = ProfileBadgeView(
-            text: isExisting ? "既存環境" : "分離プロファイル",
+            text: isExisting
+                ? L10n.text("profile.existing", fallback: "既存環境")
+                : L10n.text("profile.isolated", fallback: "分離プロファイル"),
             color: isExisting ? .systemBlue : .systemPurple
         )
         metadataStack.addArrangedSubview(badge)
 
+        if isRunning {
+            metadataStack.addArrangedSubview(
+                ProfileBadgeView(
+                    text: L10n.text("profile.running", fallback: "起動中"),
+                    color: .systemGreen
+                )
+            )
+        }
+
         let planLabel = NSTextField(
-            labelWithString: "プラン: \(usageSnapshot?.displayPlanName ?? "—")"
+            labelWithString: L10n.text(
+                "usage.plan",
+                fallback: "プラン: {plan}",
+                replacing: ["plan": usageSnapshot?.displayPlanName ?? "—"]
+            )
         )
         planLabel.font = .systemFont(ofSize: 11, weight: .medium)
         planLabel.textColor = usageSnapshot?.displayPlanName == nil
@@ -645,7 +802,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         )
         usageStack.addArrangedSubview(
             makeUsageLabel(
-                title: "週間",
+                title: L10n.text("usage.weekly", fallback: "週間"),
                 window: usageSnapshot?.secondary,
                 resetDateStyle: .monthDayAndTime
             )
@@ -661,15 +818,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
 
         let directoryLabel = NSTextField(
             labelWithString: isExisting
-                ? "保存先: ChatGPTの既定環境"
-                : "保存先: \(account.directoryName)"
+                ? L10n.text(
+                    "profile.storage.existing",
+                    fallback: "保存先: ChatGPTの既定環境"
+                )
+                : L10n.text(
+                    "profile.storage.isolated",
+                    fallback: "保存先: {directory}",
+                    replacing: ["directory": account.directoryName]
+                )
         )
         directoryLabel.font = .systemFont(ofSize: 11)
         directoryLabel.textColor = .tertiaryLabelColor
         directoryLabel.lineBreakMode = .byTruncatingMiddle
         directoryLabel.maximumNumberOfLines = 1
         directoryLabel.toolTip = isExisting
-            ? "ChatGPTの既定環境"
+            ? L10n.text(
+                "profile.storage.existing-name",
+                fallback: "ChatGPTの既定環境"
+            )
             : account.directoryName
         directoryLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         labels.addArrangedSubview(directoryLabel)
@@ -680,7 +847,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         rowStack.addArrangedSubview(spacer)
 
         let renameButton = NSButton(
-            title: "名前を変更…",
+            title: L10n.text("account.rename", fallback: "名前を変更"),
             target: self,
             action: #selector(renameAccount(_:))
         )
@@ -689,31 +856,62 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         renameButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 64).isActive = true
         renameButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 28).isActive = true
         renameButton.identifier = NSUserInterfaceItemIdentifier(account.id.uuidString)
-        renameButton.setAccessibilityLabel("\(account.name)の名前を変更")
+        renameButton.setAccessibilityLabel(
+            L10n.text(
+                "account.rename.accessibility-label",
+                fallback: "{name}の名前を変更",
+                replacing: ["name": account.name]
+            )
+        )
         rowStack.addArrangedSubview(renameButton)
 
         let openButton = NSButton(
-            title: "開く",
+            title: isRunning
+                ? L10n.text("account.quit", fallback: "終了")
+                : L10n.text("account.open", fallback: "起動"),
             target: self,
-            action: #selector(switchAccount(_:))
+            action: isRunning
+                ? #selector(quitAccount(_:))
+                : #selector(openAccount(_:))
         )
         openButton.bezelStyle = .rounded
         openButton.controlSize = .large
         openButton.isBordered = false
         openButton.wantsLayer = true
-        openButton.layer?.backgroundColor = NSColor.controlAccentColor.cgColor
+        openButton.layer?.backgroundColor = isRunning
+            ? NSColor.systemRed.withAlphaComponent(0.88).cgColor
+            : NSColor.controlAccentColor.cgColor
         openButton.layer?.cornerRadius = 7
         openButton.contentTintColor = .white
         openButton.font = .systemFont(ofSize: 13, weight: .semibold)
         openButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 46).isActive = true
         openButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 28).isActive = true
         openButton.identifier = NSUserInterfaceItemIdentifier(account.id.uuidString)
-        openButton.setAccessibilityLabel("\(account.name)を開く")
+        openButton.isEnabled = !isLaunching
+        openButton.setAccessibilityLabel(
+            isRunning
+                ? L10n.text(
+                    "account.quit.accessibility-label",
+                    fallback: "{name}のChatGPTを終了",
+                    replacing: ["name": account.name]
+                )
+                : L10n.text(
+                    "account.open.accessibility-label",
+                    fallback: "{name}のChatGPTを起動",
+                    replacing: ["name": account.name]
+                )
+        )
+        openButton.toolTip = isRunning
+            ? L10n.text(
+                "account.quit.tooltip",
+                fallback: "このプロファイルのChatGPTを終了"
+            )
+            : nil
         rowStack.addArrangedSubview(openButton)
 
         if !isExisting {
             let deleteButton = NSButton(
-                title: "削除…",
+                title: L10n.text("account.delete", fallback: "削除"),
                 target: self,
                 action: #selector(deleteAccount(_:))
             )
@@ -724,9 +922,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             deleteButton.contentTintColor = .systemRed
             deleteButton.identifier = NSUserInterfaceItemIdentifier(account.id.uuidString)
             deleteButton.hasDestructiveAction = true
-            deleteButton.isEnabled = !isSwitching
-            deleteButton.setAccessibilityLabel("\(account.name)の登録を削除")
-            deleteButton.toolTip = "アカウント登録だけを削除（保存先は保持）"
+            deleteButton.isEnabled = !isLaunching && !isRunning
+            deleteButton.setAccessibilityLabel(
+                L10n.text(
+                    "account.delete.accessibility-label",
+                    fallback: "{name}の登録を削除",
+                    replacing: ["name": account.name]
+                )
+            )
+            deleteButton.toolTip = L10n.text(
+                "account.delete.tooltip",
+                fallback: "アカウント登録だけを削除（保存先は保持）"
+            )
             rowStack.addArrangedSubview(deleteButton)
         }
 
@@ -741,9 +948,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         let value: String
         if let window {
             let resetDescription = window.resetsAt.map {
-                "\(formatResetDate($0, style: resetDateStyle))にリセット"
-            } ?? "リセット時刻不明"
-            value = "\(title) 残り \(window.remainingPercent)% \(resetDescription)"
+                L10n.text(
+                    "usage.resets-at",
+                    fallback: "{date}にリセット",
+                    replacing: [
+                        "date": formatResetDate($0, style: resetDateStyle)
+                    ]
+                )
+            } ?? L10n.text(
+                "usage.reset-time-unavailable",
+                fallback: "リセット時刻不明"
+            )
+            value = L10n.text(
+                "usage.remaining",
+                fallback: "{title} 残り {remaining}% {reset}",
+                replacing: [
+                    "title": title,
+                    "remaining": "\(window.remainingPercent)",
+                    "reset": resetDescription
+                ]
+            )
         } else {
             value = "\(title) —"
         }
@@ -757,10 +981,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         if let window {
             let resetTooltip = window.resetsAt.map {
                 formatResetDate($0, style: resetDateStyle)
-            } ?? "不明"
-            label.toolTip = "\(title)：使用済み \(window.usedPercent)%、残り \(window.remainingPercent)%\n\(resetTooltip)にリセット"
+            } ?? L10n.text("common.unknown", fallback: "不明")
+            label.toolTip = L10n.text(
+                "usage.tooltip",
+                fallback: "{title}：使用済み {used}%、残り {remaining}%\n{date}にリセット",
+                replacing: [
+                    "title": title,
+                    "used": "\(window.usedPercent)",
+                    "remaining": "\(window.remainingPercent)",
+                    "date": resetTooltip
+                ]
+            )
         } else {
-            label.toolTip = "\(title)の利用状況を取得できませんでした。ChatGPTを開いてから再度確認してください。"
+            label.toolTip = L10n.text(
+                "usage.unavailable.tooltip",
+                fallback: "{title}の利用状況を取得できませんでした。ChatGPTを開いてから再度確認してください。",
+                replacing: ["title": title]
+            )
         }
         return label
     }
@@ -770,19 +1007,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     ) -> [NSTextField] {
         var labels: [NSTextField] = []
         let titleLabel = NSTextField(
-            labelWithString: "上限リセット\(summary.availableCount)件"
+            labelWithString: L10n.resetCreditCount(summary.availableCount)
         )
         titleLabel.font = .systemFont(ofSize: 11, weight: .medium)
         titleLabel.textColor = .systemOrange
-        titleLabel.toolTip = "利用できる上限リセットクレジット: \(summary.availableCount)件"
+        titleLabel.toolTip = L10n.text(
+            summary.availableCount == 1
+                ? "usage.reset-credits.tooltip.one"
+                : "usage.reset-credits.tooltip.other",
+            fallback: "利用できる上限リセットクレジット: {count}件",
+            replacing: ["count": "\(summary.availableCount)"]
+        )
         labels.append(titleLabel)
 
         if let credits = summary.credits, !credits.isEmpty {
             for credit in credits {
                 let expiryText = credit.expiresAt.map {
                     formatResetDate($0, style: .monthDayAndTime)
-                } ?? "有効期限不明"
-                let expiryLabel = NSTextField(labelWithString: "・\(expiryText)")
+                } ?? L10n.text(
+                    "usage.reset-credit.expiry-unknown",
+                    fallback: "有効期限不明"
+                )
+                let expiryLabel = NSTextField(
+                    labelWithString: L10n.text(
+                        "usage.reset-credit.expiry",
+                        fallback: "・{date}",
+                        replacing: ["date": expiryText]
+                    )
+                )
                 expiryLabel.font = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
                 expiryLabel.textColor = .secondaryLabelColor
                 expiryLabel.setContentHuggingPriority(.required, for: .horizontal)
@@ -793,14 +1045,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             let missingCount = summary.availableCount - credits.count
             if missingCount > 0 {
                 let missingLabel = NSTextField(
-                    labelWithString: "・有効期限不明 \(missingCount)件"
+                    labelWithString: L10n.text(
+                        missingCount == 1
+                            ? "usage.reset-credit.missing.one"
+                            : "usage.reset-credit.missing.other",
+                        fallback: "・有効期限不明 {count}件",
+                        replacing: ["count": "\(missingCount)"]
+                    )
                 )
                 missingLabel.font = .systemFont(ofSize: 10)
                 missingLabel.textColor = .tertiaryLabelColor
                 labels.append(missingLabel)
             }
         } else {
-            let unavailableLabel = NSTextField(labelWithString: "・有効期限は未取得")
+            let unavailableLabel = NSTextField(
+                labelWithString: L10n.text(
+                    "usage.reset-credit.expiry-unavailable",
+                    fallback: "・有効期限は未取得"
+                )
+            )
             unavailableLabel.font = .systemFont(ofSize: 10)
             unavailableLabel.textColor = .tertiaryLabelColor
             labels.append(unavailableLabel)
@@ -827,12 +1090,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         style: UsageResetDateStyle
     ) -> String {
         let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "ja_JP")
+        formatter.locale = L10n.language.locale
         switch style {
         case .timeOnly:
             formatter.dateFormat = "HH:mm"
         case .monthDayAndTime:
-            formatter.dateFormat = "M月d日 HH:mm"
+            formatter.dateFormat = L10n.language == .japanese
+                ? "M月d日 HH:mm"
+                : "MMM d, HH:mm"
         }
         return formatter.string(from: date)
     }
@@ -842,7 +1107,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         pasteboardWriterForRow row: Int
     ) -> NSPasteboardWriting? {
         let accounts = launcher.accounts
-        guard !isSwitching, accounts.indices.contains(row) else {
+        guard !isLaunching, accounts.indices.contains(row) else {
             return nil
         }
 
@@ -858,7 +1123,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         proposedDropOperation dropOperation: NSTableView.DropOperation
     ) -> NSDragOperation {
         guard
-            !isSwitching,
+            !isLaunching,
             let sourceTable = info.draggingSource as? NSTableView,
             sourceTable === tableView
         else {
@@ -876,7 +1141,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         dropOperation: NSTableView.DropOperation
     ) -> Bool {
         guard
-            !isSwitching,
+            !isLaunching,
             dropOperation == .above,
             let rawID = info.draggingPasteboard.string(forType: accountPasteboardType),
             let accountID = UUID(uuidString: rawID),
@@ -888,10 +1153,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         do {
             try launcher.moveAccount(id: accountID, toInsertionIndex: row)
             refreshUI()
-            showTransientStatus("\(account.name) の並び順を変更しました。")
+            showTransientStatus(
+                L10n.text(
+                    "account.reorder.success",
+                    fallback: "{name} の並び順を変更しました。",
+                    replacing: ["name": account.name]
+                )
+            )
             return true
         } catch {
-            presentError(error, title: "並び順を変更できませんでした")
+            presentError(
+                error,
+                title: L10n.text(
+                    "account.reorder.error-title",
+                    fallback: "並び順を変更できませんでした"
+                )
+            )
             return false
         }
     }
@@ -907,14 +1184,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     ) {
         let alert = NSAlert()
         alert.alertStyle = .informational
-        alert.messageText = "使用する分離プロファイルを選択"
-        alert.informativeText = "「\(name)」で使う分離プロファイルを選択してください。フォルダの内容はコピー・移動せず、選択した保存先をそのまま登録します。ChatGPTの既存環境とは別の保存先です。"
-        alert.addButton(withTitle: "この保存先で追加")
-        alert.addButton(withTitle: "キャンセル")
+        alert.messageText = L10n.text(
+            "profile-choice.title",
+            fallback: "使用する分離プロファイルを選択"
+        )
+        alert.informativeText = L10n.text(
+            "profile-choice.message",
+            fallback: "「{name}」で使う分離プロファイルを選択してください。フォルダの内容はコピー・移動せず、選択した保存先をそのまま登録します。ChatGPTの既存環境とは別の保存先です。",
+            replacing: ["name": name]
+        )
+        alert.addButton(
+            withTitle: L10n.text(
+                "storage-choice.add-button",
+                fallback: "この保存先で追加"
+            )
+        )
+        alert.addButton(
+            withTitle: L10n.text("common.cancel", fallback: "キャンセル")
+        )
 
         let popup = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 430, height: 26))
         popup.controlSize = .regular
-        popup.setAccessibilityLabel("使用する分離プロファイルの保存先")
+        popup.setAccessibilityLabel(
+            L10n.text(
+                "profile-choice.accessibility-label",
+                fallback: "使用する分離プロファイルの保存先"
+            )
+        )
         candidates.forEach { popup.addItem(withTitle: $0.directoryName) }
         alert.accessoryView = popup
 
@@ -925,7 +1221,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         guard candidates.indices.contains(selectedIndex) else {
             presentError(
                 ProfileManagerError.profileDirectoryNotFound,
-                title: "既存フォルダを登録できませんでした"
+                title: L10n.text(
+                    "profile-choice.error-title",
+                    fallback: "既存フォルダを登録できませんでした"
+                )
             )
             return
         }
@@ -935,6 +1234,301 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             linkToExistingEnvironment: false,
             directoryName: candidates[selectedIndex].directoryName
         )
+    }
+
+    @objc
+    private func showSettings() {
+        if let settingsWindow, settingsWindow.isVisible {
+            settingsWindow.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        let settingsWindow = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: 300),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        settingsWindow.title = L10n.text(
+            "settings.window-title",
+            fallback: "設定"
+        )
+        settingsWindow.tabbingMode = .disallowed
+        settingsWindow.isReleasedWhenClosed = false
+        settingsWindow.center()
+        settingsWindow.delegate = self
+
+        let contentView = NSView()
+        settingsWindow.contentView = contentView
+
+        let rootStack = NSStackView()
+        rootStack.orientation = .vertical
+        rootStack.alignment = .leading
+        rootStack.spacing = 18
+        rootStack.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(rootStack)
+        NSLayoutConstraint.activate([
+            rootStack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 28),
+            rootStack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -28),
+            rootStack.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 24),
+            rootStack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -22)
+        ])
+
+        let headerStack = NSStackView()
+        headerStack.orientation = .horizontal
+        headerStack.alignment = .centerY
+        headerStack.spacing = 12
+        headerStack.translatesAutoresizingMaskIntoConstraints = false
+
+        let iconView = NSImageView(
+            image: NSImage(
+                systemSymbolName: "gearshape.fill",
+                accessibilityDescription: nil
+            ) ?? NSImage()
+        )
+        iconView.symbolConfiguration = NSImage.SymbolConfiguration(
+            pointSize: 24,
+            weight: .medium
+        )
+        iconView.contentTintColor = .controlAccentColor
+        iconView.imageScaling = .scaleProportionallyUpOrDown
+        NSLayoutConstraint.activate([
+            iconView.widthAnchor.constraint(equalToConstant: 34),
+            iconView.heightAnchor.constraint(equalToConstant: 34)
+        ])
+
+        let headerLabels = NSStackView()
+        headerLabels.orientation = .vertical
+        headerLabels.alignment = .leading
+        headerLabels.spacing = 3
+
+        let titleLabel = NSTextField(
+            labelWithString: L10n.text(
+                "settings.header-title",
+                fallback: "ChatGPT Profile Managerの設定"
+            )
+        )
+        titleLabel.font = .systemFont(ofSize: 19, weight: .semibold)
+
+        let subtitleLabel = NSTextField(
+            wrappingLabelWithString: L10n.text(
+                "settings.header-subtitle",
+                fallback: "アプリの表示言語を設定します。"
+            )
+        )
+        subtitleLabel.font = .systemFont(ofSize: 12)
+        subtitleLabel.textColor = .secondaryLabelColor
+
+        headerLabels.addArrangedSubview(titleLabel)
+        headerLabels.addArrangedSubview(subtitleLabel)
+        headerStack.addArrangedSubview(iconView)
+        headerStack.addArrangedSubview(headerLabels)
+        rootStack.addArrangedSubview(headerStack)
+        headerStack.widthAnchor.constraint(equalTo: rootStack.widthAnchor).isActive = true
+
+        let languageCard = ProfileCardView()
+        languageCard.translatesAutoresizingMaskIntoConstraints = false
+
+        let languageStack = NSStackView()
+        languageStack.orientation = .vertical
+        languageStack.alignment = .leading
+        languageStack.spacing = 10
+        languageStack.translatesAutoresizingMaskIntoConstraints = false
+        languageCard.addSubview(languageStack)
+        NSLayoutConstraint.activate([
+            languageStack.leadingAnchor.constraint(equalTo: languageCard.leadingAnchor, constant: 16),
+            languageStack.trailingAnchor.constraint(equalTo: languageCard.trailingAnchor, constant: -16),
+            languageStack.topAnchor.constraint(equalTo: languageCard.topAnchor, constant: 14),
+            languageStack.bottomAnchor.constraint(equalTo: languageCard.bottomAnchor, constant: -14)
+        ])
+
+        let languageRow = NSStackView()
+        languageRow.orientation = .horizontal
+        languageRow.alignment = .centerY
+        languageRow.spacing = 12
+        languageRow.translatesAutoresizingMaskIntoConstraints = false
+
+        let languageTitle = NSTextField(
+            labelWithString: L10n.text(
+                "settings.language.title",
+                fallback: "表示言語"
+            )
+        )
+        languageTitle.font = .systemFont(ofSize: 13, weight: .semibold)
+
+        let languagePopup = NSPopUpButton()
+        languagePopup.controlSize = .regular
+        languagePopup.setAccessibilityLabel(
+            L10n.text(
+                "settings.language.accessibility-label",
+                fallback: "アプリの表示言語"
+            )
+        )
+        let automaticLanguageName = localizedLanguageName(L10n.systemLanguage)
+        let preferenceTitles = [
+            L10n.text(
+                "settings.language.automatic",
+                fallback: "Macの設定に従う（現在：{language}）",
+                replacing: ["language": automaticLanguageName]
+            ),
+            L10n.text("settings.language.japanese", fallback: "日本語"),
+            L10n.text("settings.language.english", fallback: "English")
+        ]
+        languagePopup.addItems(withTitles: preferenceTitles)
+        if let selectedIndex = AppLanguagePreference.allCases.firstIndex(
+            of: L10n.languagePreference
+        ) {
+            languagePopup.selectItem(at: selectedIndex)
+        }
+        languagePopup.setContentHuggingPriority(.required, for: .horizontal)
+
+        languageRow.addArrangedSubview(languageTitle)
+        languageRow.addArrangedSubview(NSView())
+        languageRow.addArrangedSubview(languagePopup)
+        languageStack.addArrangedSubview(languageRow)
+        languageRow.widthAnchor.constraint(equalTo: languageStack.widthAnchor).isActive = true
+
+        let languageDescription = NSTextField(
+            wrappingLabelWithString: L10n.text(
+                "settings.language.description",
+                fallback: "「Macの設定に従う」では、Macの第一優先言語が日本語なら日本語、それ以外なら英語で表示します。日本語またはEnglishを選ぶと、Macの設定より優先されます。"
+            )
+        )
+        languageDescription.font = .systemFont(ofSize: 12)
+        languageDescription.textColor = .secondaryLabelColor
+        languageDescription.maximumNumberOfLines = 3
+        languageStack.addArrangedSubview(languageDescription)
+        languageDescription.widthAnchor.constraint(equalTo: languageStack.widthAnchor).isActive = true
+
+        let dataNote = NSTextField(
+            wrappingLabelWithString: L10n.text(
+                "settings.language.data-note",
+                fallback: "表示言語を変更しても、アカウント名、保存先、プロジェクト、チャットは変更されません。"
+            )
+        )
+        dataNote.font = .systemFont(ofSize: 11)
+        dataNote.textColor = .tertiaryLabelColor
+        dataNote.maximumNumberOfLines = 2
+        languageStack.addArrangedSubview(dataNote)
+        dataNote.widthAnchor.constraint(equalTo: languageStack.widthAnchor).isActive = true
+
+        rootStack.addArrangedSubview(languageCard)
+        languageCard.widthAnchor.constraint(equalTo: rootStack.widthAnchor).isActive = true
+
+        let footerStack = NSStackView()
+        footerStack.orientation = .horizontal
+        footerStack.alignment = .centerY
+        footerStack.spacing = 10
+        footerStack.translatesAutoresizingMaskIntoConstraints = false
+
+        let cancelButton = NSButton(
+            title: L10n.text("common.cancel", fallback: "キャンセル"),
+            target: self,
+            action: #selector(closeSettings)
+        )
+        cancelButton.bezelStyle = .rounded
+
+        let applyButton = NSButton(
+            title: L10n.text("settings.apply", fallback: "適用"),
+            target: self,
+            action: #selector(applySettings)
+        )
+        applyButton.bezelStyle = .rounded
+        applyButton.keyEquivalent = "\r"
+
+        footerStack.addArrangedSubview(NSView())
+        footerStack.addArrangedSubview(cancelButton)
+        footerStack.addArrangedSubview(applyButton)
+        rootStack.addArrangedSubview(footerStack)
+        footerStack.widthAnchor.constraint(equalTo: rootStack.widthAnchor).isActive = true
+
+        self.settingsWindow = settingsWindow
+        settingsLanguagePopup = languagePopup
+        settingsWindow.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func localizedLanguageName(_ language: AppLanguage) -> String {
+        switch language {
+        case .japanese:
+            return L10n.text("settings.language.japanese", fallback: "日本語")
+        case .english:
+            return L10n.text("settings.language.english", fallback: "English")
+        }
+    }
+
+    @objc
+    private func closeSettings() {
+        settingsWindow?.performClose(nil)
+    }
+
+    @objc
+    private func applySettings() {
+        guard
+            let selectedIndex = settingsLanguagePopup?.indexOfSelectedItem,
+            AppLanguagePreference.allCases.indices.contains(selectedIndex)
+        else {
+            return
+        }
+
+        let previousLanguage = L10n.language
+        let preference = AppLanguagePreference.allCases[selectedIndex]
+        L10n.setLanguagePreference(preference)
+        let languageChanged = previousLanguage != L10n.language
+        if languageChanged {
+            isRebuildingInterface = true
+        }
+        settingsWindow?.performClose(nil)
+
+        if languageChanged {
+            rebuildInterfaceForLanguageChange()
+            DispatchQueue.main.async { [weak self] in
+                self?.isRebuildingInterface = false
+            }
+        }
+
+        showTransientStatus(
+            L10n.text(
+                "settings.applied",
+                fallback: "表示言語の設定を適用しました。"
+            )
+        )
+    }
+
+    private func rebuildInterfaceForLanguageChange() {
+        guard let currentWindow = window else {
+            return
+        }
+
+        guideWindow?.performClose(nil)
+        guideWindow = nil
+        guidePages = []
+
+        window = nil
+        configureMainMenu()
+        configureWindow()
+        guard
+            let replacementWindow = window,
+            let replacementContentView = replacementWindow.contentView
+        else {
+            window = currentWindow
+            return
+        }
+
+        replacementWindow.contentView = nil
+        currentWindow.contentView = replacementContentView
+        currentWindow.title = replacementWindow.title
+        currentWindow.minSize = replacementWindow.minSize
+        currentWindow.delegate = self
+        window = currentWindow
+
+        replacementWindow.isReleasedWhenClosed = true
+        replacementWindow.close()
+
+        refreshUI()
+        refreshUsage()
+        showMainWindow()
     }
 
     @objc
@@ -1014,268 +1608,405 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         }
 
         guidePages = [
-            makeGuidePage(title: "はじめに") { content in
+            makeGuidePage(
+                title: L10n.text("guide.introduction.title", fallback: "はじめに")
+            ) { content in
                 appendGuideText(
                     content,
-                    "ChatGPT Profile Managerは、ChatGPTアカウントごとに使う保存先を選び、切り替えて起動するためのアプリです。アカウントやクラウド上のプロジェクトを移動・コピーするものではありません。\n\n",
+                    L10n.text(
+                        "guide.introduction.summary",
+                        fallback: "ChatGPT Profile Managerは、ChatGPTアカウントごとに使う保存先を分け、異なるプロファイルを同時に起動するためのアプリです。アカウントやクラウド上のプロジェクトを移動・コピーするものではありません。\n\n"
+                    ),
                     font: bodyFont,
                     color: .secondaryLabelColor,
                     paragraphStyle: bodyParagraphStyle
                 )
                 appendGuideText(
                     content,
-                    "全体の流れ\n",
+                    L10n.text(
+                        "guide.introduction.flow-heading",
+                        fallback: "全体の流れ\n"
+                    ),
                     font: sectionFont,
                     paragraphStyle: sectionParagraphStyle
                 )
                 appendGuideText(
                     content,
-                    "1　初回アカウントを確認\n2　保存先を選択\n3　必要ならログイン\n4　一覧の「開く」で切り替え\n\n",
+                    L10n.text(
+                        "guide.introduction.flow-body",
+                        fallback: "1　初回アカウントを確認\n2　保存先を選択\n3　必要ならログイン\n4　一覧の「起動」からプロファイルごとに起動\n\n"
+                    ),
                     font: bodyFont,
                     paragraphStyle: bodyParagraphStyle
                 )
                 appendGuideText(
                     content,
-                    "大切な前提\n",
+                    L10n.text(
+                        "guide.introduction.prerequisite-heading",
+                        fallback: "大切な前提\n"
+                    ),
                     font: sectionFont,
                     paragraphStyle: sectionParagraphStyle
                 )
                 appendGuideText(
                     content,
-                    "既存環境がある場合、最初の起動時にメールアドレスを表示名として自動登録します。既存環境がない場合や2件目以降は、アカウント追加から保存先を選びます。アカウント間でプロジェクトやチャットをコピーすることはありません。",
+                    L10n.text(
+                        "guide.introduction.prerequisite-body",
+                        fallback: "既存環境がある場合、最初の起動時にメールアドレスを表示名として自動登録します。既存環境がない場合や2件目以降は、アカウント追加から保存先を選びます。アカウント間でプロジェクトやチャットをコピーすることはありません。"
+                    ),
                     font: bodyFont,
                     paragraphStyle: bodyParagraphStyle
                 )
             },
-            makeGuidePage(title: "アカウントを登録") { content in
+            makeGuidePage(
+                title: L10n.text("guide.register.title", fallback: "アカウントを登録")
+            ) { content in
                 appendGuideText(
                     content,
-                    "アプリを起動する\n",
+                    L10n.text(
+                        "guide.register.launch-heading",
+                        fallback: "アプリを起動する\n"
+                    ),
                     font: sectionFont,
                     paragraphStyle: sectionParagraphStyle
                 )
                 appendGuideText(
                     content,
-                    "ChatGPT Profile Managerを起動します。既存環境がある場合は、最初のアカウントをメールアドレスの表示名で自動登録します。登録しただけではChatGPTは起動せず、一覧の「開く」を押したときだけ選択した環境を起動します。\n\n",
+                    L10n.text(
+                        "guide.register.launch-body",
+                        fallback: "ChatGPT Profile Managerを起動します。既存環境がある場合は、最初のアカウントをメールアドレスの表示名で自動登録します。登録しただけではChatGPTは起動せず、一覧の「起動」を押したときだけ選択した環境を起動します。\n\n"
+                    ),
                     font: bodyFont,
                     paragraphStyle: bodyParagraphStyle
                 )
                 appendGuideText(
                     content,
-                    "アカウントを追加する\n",
+                    L10n.text(
+                        "guide.register.add-heading",
+                        fallback: "アカウントを追加する\n"
+                    ),
                     font: sectionFont,
                     paragraphStyle: sectionParagraphStyle
                 )
                 appendGuideText(
                     content,
-                    "既存環境が自動登録されなかった場合や、別のアカウントを追加する場合は、「アカウントを追加」を押して一覧で表示する名前を入力します。メールアドレス以外の名前にも変更できます。アカウントは任意の数を追加できます。名前は1文字以上60文字以内で、同じ名前は登録できません。",
+                    L10n.text(
+                        "guide.register.add-body",
+                        fallback: "既存環境が自動登録されなかった場合や、別のアカウントを追加する場合は、「アカウントを追加」を押して一覧で表示する名前を入力します。メールアドレス以外の名前にも変更できます。アカウントは任意の数を追加できます。名前は1文字以上60文字以内で、同じ名前は登録できません。"
+                    ),
                     font: bodyFont,
                     paragraphStyle: bodyParagraphStyle
                 )
             },
-            makeGuidePage(title: "保存先を選ぶ") { content in
+            makeGuidePage(
+                title: L10n.text("guide.storage.title", fallback: "保存先を選ぶ")
+            ) { content in
                 appendGuideText(
                     content,
-                    "名前の入力後、「このアカウントで使う保存先を選択」と表示されます。次の3つから、アカウントで使う環境を選びます。\n\n",
+                    L10n.text(
+                        "guide.storage.introduction",
+                        fallback: "名前の入力後、「このアカウントで使う保存先を選択」と表示されます。次の3つから、アカウントで使う環境を選びます。\n\n"
+                    ),
                     font: bodyFont,
                     paragraphStyle: bodyParagraphStyle
                 )
                 appendGuideText(
                     content,
-                    "ChatGPTの既存環境を使う\n",
+                    L10n.text(
+                        "guide.storage.existing-heading",
+                        fallback: "ChatGPTの既存環境を使う\n"
+                    ),
                     font: sectionFont,
                     paragraphStyle: sectionParagraphStyle
                 )
                 appendGuideText(
                     content,
-                    "普段のChatGPTのプロジェクト、チャット、設定、ログイン状態をそのまま使います。割り当てられるのは1アカウントだけです。\n\n",
+                    L10n.text(
+                        "guide.storage.existing-body",
+                        fallback: "普段のChatGPTのプロジェクト、チャット、設定、ログイン状態をそのまま使います。割り当てられるのは1アカウントだけです。\n\n"
+                    ),
                     font: bodyFont,
                     paragraphStyle: bodyParagraphStyle
                 )
                 appendGuideText(
                     content,
-                    "新しい分離プロファイルを作る\n",
+                    L10n.text(
+                        "guide.storage.new-heading",
+                        fallback: "新しい分離プロファイルを作る\n"
+                    ),
                     font: sectionFont,
                     paragraphStyle: sectionParagraphStyle
                 )
                 appendGuideText(
                     content,
-                    "このアカウント専用の保存先を新しく作ります。既存環境のデータはコピーされません。\n\n",
+                    L10n.text(
+                        "guide.storage.new-body",
+                        fallback: "このアカウント専用の保存先を新しく作ります。既存環境のデータはコピーされません。\n\n"
+                    ),
                     font: bodyFont,
                     paragraphStyle: bodyParagraphStyle
                 )
                 appendGuideText(
                     content,
-                    "既存の分離プロファイルを使う\n",
+                    L10n.text(
+                        "guide.storage.existing-isolated-heading",
+                        fallback: "既存の分離プロファイルを使う\n"
+                    ),
                     font: sectionFont,
                     paragraphStyle: sectionParagraphStyle
                 )
                 appendGuideText(
                     content,
-                    "すでにある保存フォルダを選んで登録します。フォルダのコピーや移動は行いません。",
+                    L10n.text(
+                        "guide.storage.existing-isolated-body",
+                        fallback: "すでにある保存フォルダを選んで登録します。フォルダのコピーや移動は行いません。"
+                    ),
                     font: bodyFont,
                     paragraphStyle: bodyParagraphStyle
                 )
             },
-            makeGuidePage(title: "ログインして切り替える") { content in
+            makeGuidePage(
+                title: L10n.text("guide.switch.title", fallback: "ログインして起動する")
+            ) { content in
                 appendGuideText(
                     content,
-                    "初回ログイン\n",
+                    L10n.text(
+                        "guide.switch.login-heading",
+                        fallback: "初回ログイン\n"
+                    ),
                     font: sectionFont,
                     paragraphStyle: sectionParagraphStyle
                 )
                 appendGuideText(
                     content,
-                    "新しい分離プロファイルを初めて開くときは、その保存先で使うChatGPTアカウントへログインします。ログイン状態、プロジェクト、チャットは、その分離プロファイル内に保存されます。既存環境を選んだ場合は、普段のログイン状態をそのまま使います。\n\n",
+                    L10n.text(
+                        "guide.switch.login-body",
+                        fallback: "新しい分離プロファイルを初めて起動するときは、その保存先で使うChatGPTアカウントへログインします。ログイン状態、プロジェクト、チャットは、その分離プロファイル内に保存されます。既存環境を選んだ場合は、普段のログイン状態をそのまま使います。\n\n"
+                    ),
                     font: bodyFont,
                     paragraphStyle: bodyParagraphStyle
                 )
                 appendGuideText(
                     content,
-                    "「開く」で切り替える\n",
+                    L10n.text(
+                        "guide.switch.open-heading",
+                        fallback: "プロファイルを並列で起動\n"
+                    ),
                     font: sectionFont,
                     paragraphStyle: sectionParagraphStyle
                 )
                 appendGuideText(
                     content,
-                    "一覧からアカウントを選び、「開く」を押します。実行中のChatGPTを通常終了してから、選択した保存先で再起動します。ChatGPTが10秒以内に終了しない場合は強制終了せず、切り替えを止めます。切り替え前に実行中のローカルタスクがないことを確認してください。",
-                    font: bodyFont,
-                    paragraphStyle: bodyParagraphStyle
-                )
-            },
-            makeGuidePage(title: "アカウントを整理する") { content in
-                appendGuideText(
-                    content,
-                    "別のアカウントを追加する\n",
-                    font: sectionFont,
-                    paragraphStyle: sectionParagraphStyle
-                )
-                appendGuideText(
-                    content,
-                    "同じ手順で何件でも追加できます。既存環境を割り当てた後は、その選択肢が無効になり、分離プロファイルを使います。未登録の保存フォルダを使う場合は、保存先の選択画面で「既存の分離プロファイルを使う」を選びます。\n\n",
-                    font: bodyFont,
-                    paragraphStyle: bodyParagraphStyle
-                )
-                appendGuideText(
-                    content,
-                    "一覧を整える\n",
-                    font: sectionFont,
-                    paragraphStyle: sectionParagraphStyle
-                )
-                appendGuideText(
-                    content,
-                    "「名前を変更…」は表示名だけを変更します。行をドラッグすると表示順だけを変更します。\n\n",
-                    font: bodyFont,
-                    paragraphStyle: bodyParagraphStyle
-                )
-                appendGuideText(
-                    content,
-                    "分離プロファイルを登録から外す\n",
-                    font: sectionFont,
-                    paragraphStyle: sectionParagraphStyle
-                )
-                appendGuideText(
-                    content,
-                    "分離プロファイルの「削除…」は登録情報だけを外し、保存フォルダやデータは残します。既存環境に割り当てたアカウントは削除できません。",
+                    L10n.text(
+                        "guide.switch.open-body",
+                        fallback: "一覧からアカウントを選び、「起動」を押します。他のプロファイルを終了せず、別のChatGPTインスタンスとして起動します。データを保護するため、同じ保存先は複数起動できません。起動中の行では「起動」が「終了」に変わります。確認後、そのプロファイルのChatGPTだけを終了します。"
+                    ),
                     font: bodyFont,
                     paragraphStyle: bodyParagraphStyle
                 )
             },
-            makeGuidePage(title: "仕組みと保存場所") { content in
+            makeGuidePage(
+                title: L10n.text("guide.organize.title", fallback: "アカウントを整理する")
+            ) { content in
                 appendGuideText(
                     content,
-                    "保存先は2種類\n",
+                    L10n.text(
+                        "guide.organize.add-heading",
+                        fallback: "別のアカウントを追加する\n"
+                    ),
                     font: sectionFont,
                     paragraphStyle: sectionParagraphStyle
                 )
                 appendGuideText(
                     content,
-                    "ChatGPTの既存環境は、ChatGPTが普段使っている保存先です。分離プロファイルは、ChatGPT Profile Managerがアカウントごとに用意する専用の保存先です。ログイン状態やアプリデータをアカウントごとに分けます。\n\n",
+                    L10n.text(
+                        "guide.organize.add-body",
+                        fallback: "同じ手順で何件でも追加できます。既存環境を割り当てた後は、その選択肢が無効になり、分離プロファイルを使います。未登録の保存フォルダを使う場合は、保存先の選択画面で「既存の分離プロファイルを使う」を選びます。\n\n"
+                    ),
                     font: bodyFont,
                     paragraphStyle: bodyParagraphStyle
                 )
                 appendGuideText(
                     content,
-                    "起動時に保存先を指定する仕組み\n",
+                    L10n.text(
+                        "guide.organize.list-heading",
+                        fallback: "一覧を整える\n"
+                    ),
                     font: sectionFont,
                     paragraphStyle: sectionParagraphStyle
                 )
                 appendGuideText(
                     content,
-                    "既存環境を使う場合は、ChatGPTを通常起動します。分離プロファイルを使う場合は、起動時だけ専用の保存先を環境変数と引数で指定します。ChatGPT Profile Managerがデータをコピー・移動するのではなく、ChatGPTが読み込む場所を起動ごとに切り替えます。\n\n",
+                    L10n.text(
+                        "guide.organize.list-body",
+                        fallback: "「名前を変更」は表示名だけを変更します。行をドラッグすると表示順だけを変更します。\n\n"
+                    ),
                     font: bodyFont,
                     paragraphStyle: bodyParagraphStyle
                 )
                 appendGuideText(
                     content,
-                    "指定する場所の役割\n",
+                    L10n.text(
+                        "guide.organize.remove-heading",
+                        fallback: "分離プロファイルを登録から外す\n"
+                    ),
                     font: sectionFont,
                     paragraphStyle: sectionParagraphStyle
                 )
                 appendGuideText(
                     content,
-                    "CODEX_HOMEはCodexの設定、認証、セッション、ログなどを保存します。CODEX_ELECTRON_USER_DATA_PATHと--user-data-dirは、ChatGPTデスクトップアプリ側のCookie、ログイン状態、アプリデータの保存先を指定します。この2つを同じ分離プロファイル内で指定することで、アカウントごとの環境を分けます。\n\n",
+                    L10n.text(
+                        "guide.organize.remove-body",
+                        fallback: "分離プロファイルの「削除」は登録情報だけを外し、保存フォルダやデータは残します。既存環境に割り当てたアカウントは削除できません。"
+                    ),
+                    font: bodyFont,
+                    paragraphStyle: bodyParagraphStyle
+                )
+            },
+            makeGuidePage(
+                title: L10n.text("guide.mechanism.title", fallback: "仕組みと保存場所")
+            ) { content in
+                appendGuideText(
+                    content,
+                    L10n.text(
+                        "guide.mechanism.storage-heading",
+                        fallback: "保存先は2種類\n"
+                    ),
+                    font: sectionFont,
+                    paragraphStyle: sectionParagraphStyle
+                )
+                appendGuideText(
+                    content,
+                    L10n.text(
+                        "guide.mechanism.storage-body",
+                        fallback: "ChatGPTの既存環境は、ChatGPTが普段使っている保存先です。分離プロファイルは、ChatGPT Profile Managerがアカウントごとに用意する専用の保存先です。ログイン状態やアプリデータをアカウントごとに分けます。\n\n"
+                    ),
                     font: bodyFont,
                     paragraphStyle: bodyParagraphStyle
                 )
                 appendGuideText(
                     content,
-                    "保存場所\n",
+                    L10n.text(
+                        "guide.mechanism.launch-heading",
+                        fallback: "起動時に保存先を指定する仕組み\n"
+                    ),
+                    font: sectionFont,
+                    paragraphStyle: sectionParagraphStyle
+                )
+                appendGuideText(
+                    content,
+                    L10n.text(
+                        "guide.mechanism.launch-body",
+                        fallback: "既存環境はChatGPTの既定の保存先で起動します。分離プロファイルは、インスタンスごとに専用の保存先を環境変数と引数で指定します。ChatGPT Profile Managerがデータをコピー・移動するのではなく、同時に起動するChatGPTそれぞれに別の読み込み先を指定します。\n\n"
+                    ),
+                    font: bodyFont,
+                    paragraphStyle: bodyParagraphStyle
+                )
+                appendGuideText(
+                    content,
+                    L10n.text(
+                        "guide.mechanism.paths-heading",
+                        fallback: "指定する場所の役割\n"
+                    ),
+                    font: sectionFont,
+                    paragraphStyle: sectionParagraphStyle
+                )
+                appendGuideText(
+                    content,
+                    L10n.text(
+                        "guide.mechanism.paths-body",
+                        fallback: "CODEX_HOMEはCodexの設定、認証、セッション、ログなどを保存します。CODEX_ELECTRON_USER_DATA_PATHと--user-data-dirは、ChatGPTデスクトップアプリ側のCookie、ログイン状態、アプリデータの保存先を指定します。この2つを同じ分離プロファイル内で指定することで、アカウントごとの環境を分けます。\n\n"
+                    ),
+                    font: bodyFont,
+                    paragraphStyle: bodyParagraphStyle
+                )
+                appendGuideText(
+                    content,
+                    L10n.text(
+                        "guide.mechanism.location-heading",
+                        fallback: "保存場所\n"
+                    ),
                     font: sectionFont,
                     paragraphStyle: sectionParagraphStyle
                 )
                 appendGuideCode(
                     content,
-                    "~/Library/Application Support/\n└── ChatGPT Profile Manager/\n    └── Profiles/\n        └── account-<表示名>-<短いID>/\n            ├── CodexHome/\n            └── ElectronUserData/"
+                    L10n.text(
+                        "guide.mechanism.location-tree",
+                        fallback: "~/Library/Application Support/\n└── ChatGPT Profile Manager/\n    └── Profiles/\n        └── account-<表示名>-<短いID>/\n            ├── CodexHome/\n            └── ElectronUserData/"
+                    )
                 )
                 appendGuideText(
                     content,
-                    "利用上限の表示\n",
+                    L10n.text(
+                        "guide.mechanism.usage-heading",
+                        fallback: "利用上限の表示\n"
+                    ),
                     font: sectionFont,
                     paragraphStyle: sectionParagraphStyle
                 )
                 appendGuideText(
                     content,
-                    "アカウント一覧には取得できたプラン名も表示します。「5H」は5時間枠、「週間」は週間枠です。5Hは残りの割合と24時間表記の時刻、週間は残りの割合と月日・24時間表記の時刻を同じ行に表示します。利用できる上限リセットクレジットがある場合は、週間行の下に件数と有効期限を表示します。複数件ある場合は期限を一行ずつ表示します。ラベルにカーソルを合わせると、使用済みの割合と詳細なリセット日時を確認できます。Codexコマンドが見つからない場合、未ログインの場合、または通信できない場合は「—」と表示します。利用状況や認証情報をこのアプリの設定へ保存することはありません。",
+                    L10n.text(
+                        "guide.mechanism.usage-body",
+                        fallback: "アカウント一覧には取得できたプラン名も表示します。「5H」は5時間枠、「週間」は週間枠です。5Hは残りの割合と24時間表記の時刻、週間は残りの割合と月日・24時間表記の時刻を同じ行に表示します。利用できる上限リセットクレジットがある場合は、週間行の下に件数と有効期限を表示します。複数件ある場合は期限を一行ずつ表示します。ラベルにカーソルを合わせると、使用済みの割合と詳細なリセット日時を確認できます。Codexコマンドが見つからない場合、未ログインの場合、または通信できない場合は「—」と表示します。利用状況や認証情報をこのアプリの設定へ保存することはありません。"
+                    ),
                     font: bodyFont,
                     paragraphStyle: bodyParagraphStyle
                 )
             },
-            makeGuidePage(title: "困ったとき・安全に使う") { content in
+            makeGuidePage(
+                title: L10n.text("guide.safety.title", fallback: "困ったとき・安全に使う")
+            ) { content in
                 appendGuideText(
                     content,
-                    "初回登録について\n",
+                    L10n.text(
+                        "guide.safety.registration-heading",
+                        fallback: "初回登録について\n"
+                    ),
                     font: sectionFont,
                     paragraphStyle: sectionParagraphStyle
                 )
                 appendGuideText(
                     content,
-                    "初回起動時に既存環境が見つかると、メールアドレスを表示名にして自動登録します。登録後も「名前を変更…」から表示名だけ変更できます。\n\n",
+                    L10n.text(
+                        "guide.safety.registration-body",
+                        fallback: "初回起動時に既存環境が見つかると、メールアドレスを表示名にして自動登録します。登録後も「名前を変更」から表示名だけ変更できます。\n\n"
+                    ),
                     font: bodyFont,
                     paragraphStyle: bodyParagraphStyle
                 )
                 appendGuideText(
                     content,
-                    "アプリを開く場所\n",
+                    L10n.text(
+                        "guide.safety.launch-heading",
+                        fallback: "ChatGPTを起動する場所\n"
+                    ),
                     font: sectionFont,
                     paragraphStyle: sectionParagraphStyle
                 )
                 appendGuideText(
                     content,
-                    "複数アカウントを使うときは、普段のChatGPTアイコンではなく、このアプリの「開く」から起動してください。切り替え前には、実行中のローカルタスクがないことを確認してください。\n\n",
+                    L10n.text(
+                        "guide.safety.launch-body",
+                        fallback: "複数アカウントを使うときは、普段のChatGPTアイコンではなく、このアプリの「起動」から起動してください。異なるプロファイルは同時に起動できますが、同じプロファイルは二重起動できません。起動中のプロファイルは一覧に「起動中」と表示され、操作ボタンが「終了」に変わります。終了前には、進行中の作業がないか確認してください。\n\n"
+                    ),
                     font: bodyFont,
                     paragraphStyle: bodyParagraphStyle
                 )
                 appendGuideText(
                     content,
-                    "注意\n",
+                    L10n.text("guide.safety.warning-heading", fallback: "注意\n"),
                     font: sectionFont,
                     color: .systemOrange,
                     paragraphStyle: sectionParagraphStyle
                 )
                 appendGuideText(
                     content,
-                    "このアプリはOpenAI公式機能ではありません。アカウントの利用上限を回避する目的では使用しないでください。",
+                    L10n.text(
+                        "guide.safety.warning-body",
+                        fallback: "このアプリはOpenAI公式機能ではありません。アカウントの利用上限を回避する目的では使用しないでください。"
+                    ),
                     font: bodyFont,
                     color: .secondaryLabelColor,
                     paragraphStyle: bodyParagraphStyle
@@ -1289,7 +2020,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             backing: .buffered,
             defer: false
         )
-        guideWindow.title = "このアプリの仕組み"
+        guideWindow.title = L10n.text(
+            "guide.window-title",
+            fallback: "このアプリの仕組み"
+        )
         guideWindow.tabbingMode = .disallowed
         guideWindow.minSize = NSSize(width: 560, height: 480)
         guideWindow.isReleasedWhenClosed = false
@@ -1301,7 +2035,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         headerStack.spacing = 12
         headerStack.translatesAutoresizingMaskIntoConstraints = false
 
-        let headerTitleLabel = NSTextField(labelWithString: "使い方チュートリアル")
+        let headerTitleLabel = NSTextField(
+            labelWithString: L10n.text(
+                "guide.header-title",
+                fallback: "使い方チュートリアル"
+            )
+        )
         headerTitleLabel.font = NSFont.systemFont(ofSize: 17, weight: .semibold)
         headerTitleLabel.textColor = .labelColor
 
@@ -1352,16 +2091,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             button.isBordered = false
             button.font = NSFont.systemFont(ofSize: 18, weight: .regular)
             button.contentTintColor = .secondaryLabelColor
-            button.setAccessibilityLabel("ページ \(index + 1)/\(guidePages.count)へ移動")
+            button.setAccessibilityLabel(
+                L10n.text(
+                    "guide.page.accessibility-label",
+                    fallback: "ページ {current}/{total}へ移動",
+                    replacing: [
+                        "current": "\(index + 1)",
+                        "total": "\(guidePages.count)"
+                    ]
+                )
+            )
             dotsStack.addArrangedSubview(button)
             return button
         }
 
-        let previousButton = NSButton(title: "前へ", target: self, action: #selector(showPreviousGuidePage))
+        let previousButton = NSButton(
+            title: L10n.text("guide.previous", fallback: "前へ"),
+            target: self,
+            action: #selector(showPreviousGuidePage)
+        )
         previousButton.bezelStyle = .rounded
         previousButton.controlSize = .large
 
-        let nextButton = NSButton(title: "次へ", target: self, action: #selector(showNextGuidePage))
+        let nextButton = NSButton(
+            title: L10n.text("guide.next", fallback: "次へ"),
+            target: self,
+            action: #selector(showNextGuidePage)
+        )
         nextButton.bezelStyle = .rounded
         nextButton.controlSize = .large
         nextButton.keyEquivalent = "\r"
@@ -1462,9 +2218,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             enclosingScrollView.reflectScrolledClipView(enclosingScrollView.contentView)
         }
 
-        guideProgressLabel.stringValue = "ページ \(guidePageIndex + 1) / \(guidePages.count)"
+        guideProgressLabel.stringValue = L10n.text(
+            "guide.progress",
+            fallback: "ページ {current} / {total}",
+            replacing: [
+                "current": "\(guidePageIndex + 1)",
+                "total": "\(guidePages.count)"
+            ]
+        )
         guidePreviousButton.isEnabled = guidePageIndex > 0
-        guideNextButton.title = guidePageIndex == guidePages.count - 1 ? "完了" : "次へ"
+        guideNextButton.title = guidePageIndex == guidePages.count - 1
+            ? L10n.text("guide.done", fallback: "完了")
+            : L10n.text("guide.next", fallback: "次へ")
 
         for (index, button) in guideDotButtons.enumerated() {
             button.title = index == guidePageIndex ? "●" : "○"
@@ -1480,14 +2245,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         let alert = NSAlert()
         alert.alertStyle = .informational
         alert.messageText = launcher.accounts.isEmpty
-            ? "最初のアカウントを追加します"
-            : "アカウントを追加します"
-        alert.informativeText = "ChatGPT Profile Managerで表示する分かりやすい名前を入力してください。メールアドレスそのものを使う必要はありません。"
-        alert.addButton(withTitle: "次へ")
-        alert.addButton(withTitle: "キャンセル")
+            ? L10n.text("account.add.first-title", fallback: "最初のアカウントを追加します")
+            : L10n.text("account.add.title", fallback: "アカウントを追加します")
+        alert.informativeText = L10n.text(
+            "account.add.message",
+            fallback: "ChatGPT Profile Managerで表示する分かりやすい名前を入力してください。メールアドレスそのものを使う必要はありません。"
+        )
+        alert.addButton(withTitle: L10n.text("common.next", fallback: "次へ"))
+        alert.addButton(withTitle: L10n.text("common.cancel", fallback: "キャンセル"))
 
         let nameField = NSTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
-        nameField.placeholderString = "例：メイン、開発チーム、取引先A"
+        nameField.placeholderString = L10n.text(
+            "account.add.placeholder",
+            fallback: "例：メイン、開発チーム、取引先A"
+        )
         alert.accessoryView = nameField
         alert.window.initialFirstResponder = nameField
 
@@ -1499,7 +2270,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         do {
             name = try launcher.validateNewAccountName(nameField.stringValue)
         } catch {
-            presentError(error, title: "アカウント名を使用できません")
+            presentError(
+                error,
+                title: L10n.text(
+                    "account.name-invalid-title",
+                    fallback: "アカウント名を使用できません"
+                )
+            )
             DispatchQueue.main.async { [weak self] in
                 self?.presentAddAccount()
             }
@@ -1529,12 +2306,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         do {
             if let account = try launcher.registerExistingEnvironmentIfNeeded() {
                 refreshUI()
-                showTransientStatus("\(account.name) を既存のChatGPT環境へ自動登録しました。")
+                showTransientStatus(
+                    L10n.text(
+                        "account.existing-auto-registered",
+                        fallback: "{name} を既存のChatGPT環境へ自動登録しました。",
+                        replacing: ["name": account.name]
+                    )
+                )
                 refreshUsage()
                 return
             }
         } catch {
-            presentError(error, title: "既存環境を自動登録できませんでした")
+            presentError(
+                error,
+                title: L10n.text(
+                    "account.existing-auto-register-error-title",
+                    fallback: "既存環境を自動登録できませんでした"
+                )
+            )
         }
 
         presentAddAccount()
@@ -1546,10 +2335,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
 
         let alert = NSAlert()
         alert.alertStyle = .informational
-        alert.messageText = "「\(name)」で使う保存先を選択"
-        alert.informativeText = "このアカウントでChatGPTが使う保存先を選びます。既存環境を使うと普段のプロジェクトやチャットをそのまま開きます。分離プロファイルを使うと、このアカウント専用の保存先を使います。"
-        alert.addButton(withTitle: "この保存先で追加")
-        alert.addButton(withTitle: "キャンセル")
+        alert.messageText = L10n.text(
+            "storage-choice.title",
+            fallback: "「{name}」で使う保存先を選択",
+            replacing: ["name": name]
+        )
+        alert.informativeText = L10n.text(
+            "storage-choice.message",
+            fallback: "このアカウントでChatGPTが使う保存先を選びます。既存環境を使うと普段のプロジェクトやチャットをそのまま開きます。分離プロファイルを使うと、このアカウント専用の保存先を使います。"
+        )
+        alert.addButton(
+            withTitle: L10n.text("storage-choice.add-button", fallback: "この保存先で追加")
+        )
+        alert.addButton(withTitle: L10n.text("common.cancel", fallback: "キャンセル"))
 
         let accessoryView = NSView(frame: NSRect(x: 0, y: 0, width: 440, height: 142))
         let choiceStack = NSStackView()
@@ -1568,24 +2366,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         let options = [
             (
                 choice: AccountStorageChoice.existingEnvironment,
-                title: "ChatGPTの既存環境を使う",
+                title: L10n.text(
+                    "storage-choice.existing.title",
+                    fallback: "ChatGPTの既存環境を使う"
+                ),
                 description: existingEnvironmentAccount.map {
-                    "普段のChatGPTのプロジェクト・チャットをそのまま使う（「\($0.name)」に割り当て済み）"
-                } ?? "普段のChatGPTのプロジェクト・チャットをそのまま使う",
+                    L10n.text(
+                        "storage-choice.existing.assigned-description",
+                        fallback: "普段のChatGPTのプロジェクト・チャットをそのまま使う（「{name}」に割り当て済み）",
+                        replacing: ["name": $0.name]
+                    )
+                } ?? L10n.text(
+                    "storage-choice.existing.description",
+                    fallback: "普段のChatGPTのプロジェクト・チャットをそのまま使う"
+                ),
                 isEnabled: existingEnvironmentAccount == nil
             ),
             (
                 choice: AccountStorageChoice.newIsolatedProfile,
-                title: "新しい分離プロファイルを作る",
-                description: "このアカウント専用の保存先を新しく作成する",
+                title: L10n.text(
+                    "storage-choice.new.title",
+                    fallback: "新しい分離プロファイルを作る"
+                ),
+                description: L10n.text(
+                    "storage-choice.new.description",
+                    fallback: "このアカウント専用の保存先を新しく作成する"
+                ),
                 isEnabled: true
             ),
             (
                 choice: AccountStorageChoice.existingIsolatedProfile,
-                title: "既存の分離プロファイルを使う",
+                title: L10n.text(
+                    "storage-choice.existing-isolated.title",
+                    fallback: "既存の分離プロファイルを使う"
+                ),
                 description: candidates.isEmpty
-                    ? "登録できる既存フォルダがありません"
-                    : "すでにある分離プロファイルを選んで使う",
+                    ? L10n.text(
+                        "storage-choice.existing-isolated.empty-description",
+                        fallback: "登録できる既存フォルダがありません"
+                    )
+                    : L10n.text(
+                        "storage-choice.existing-isolated.description",
+                        fallback: "すでにある分離プロファイルを選んで使う"
+                    ),
                 isEnabled: !candidates.isEmpty
             )
         ]
@@ -1662,7 +2485,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             guard !candidates.isEmpty else {
                 presentError(
                     ProfileManagerError.profileDirectoryNotFound,
-                    title: "既存の分離プロファイルを選択できませんでした"
+                    title: L10n.text(
+                        "storage-choice.existing-isolated.error-title",
+                        fallback: "既存の分離プロファイルを選択できませんでした"
+                    )
                 )
                 return
             }
@@ -1680,10 +2506,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     private func confirmExistingEnvironmentAssignment(named name: String) {
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "ChatGPTの既存環境を「\(name)」へ固定しますか？"
-        alert.informativeText = "ChatGPTの既存環境をこのアカウントに割り当てます。紐づけられるのは1アカウントだけで、既存データのコピーや移動は行いません。確定後に追加するアカウントは、すべて分離プロファイルになります。"
-        alert.addButton(withTitle: "ChatGPTの既存環境に固定")
-        alert.addButton(withTitle: "戻る")
+        alert.messageText = L10n.text(
+            "existing-assignment.title",
+            fallback: "ChatGPTの既存環境を「{name}」へ固定しますか？",
+            replacing: ["name": name]
+        )
+        alert.informativeText = L10n.text(
+            "existing-assignment.message",
+            fallback: "ChatGPTの既存環境をこのアカウントに割り当てます。紐づけられるのは1アカウントだけで、既存データのコピーや移動は行いません。確定後に追加するアカウントは、すべて分離プロファイルになります。"
+        )
+        alert.addButton(
+            withTitle: L10n.text(
+                "existing-assignment.confirm",
+                fallback: "ChatGPTの既存環境に固定"
+            )
+        )
+        alert.addButton(withTitle: L10n.text("common.back", fallback: "戻る"))
 
         guard alert.runModal() == .alertFirstButtonReturn else {
             DispatchQueue.main.async { [weak self] in
@@ -1709,14 +2547,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             refreshUI()
             refreshUsage()
             if linkToExistingEnvironment {
-                showTransientStatus("\(account.name) を既存のChatGPT環境へ固定しました。")
+                showTransientStatus(
+                    L10n.text(
+                        "account.created.existing",
+                        fallback: "{name} を既存のChatGPT環境へ固定しました。",
+                        replacing: ["name": account.name]
+                    )
+                )
             } else if directoryName != nil {
-                showTransientStatus("\(account.name) に既存の分離プロファイルを登録しました。")
+                showTransientStatus(
+                    L10n.text(
+                        "account.created.existing-isolated",
+                        fallback: "{name} に既存の分離プロファイルを登録しました。",
+                        replacing: ["name": account.name]
+                    )
+                )
             } else {
-                showTransientStatus("\(account.name) を新しい分離プロファイルとして追加しました。")
+                showTransientStatus(
+                    L10n.text(
+                        "account.created.new-isolated",
+                        fallback: "{name} を新しい分離プロファイルとして追加しました。",
+                        replacing: ["name": account.name]
+                    )
+                )
             }
         } catch {
-            presentError(error, title: "アカウントを追加できませんでした")
+            presentError(
+                error,
+                title: L10n.text(
+                    "account.add.error-title",
+                    fallback: "アカウントを追加できませんでした"
+                )
+            )
         }
     }
 
@@ -1733,10 +2595,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
 
         let alert = NSAlert()
         alert.alertStyle = .informational
-        alert.messageText = "アカウント名を変更します"
-        alert.informativeText = "名前だけを変更します。紐づけ先や保存済みデータは変わりません。"
-        alert.addButton(withTitle: "変更")
-        alert.addButton(withTitle: "キャンセル")
+        alert.messageText = L10n.text(
+            "account.rename.title",
+            fallback: "アカウント名を変更します"
+        )
+        alert.informativeText = L10n.text(
+            "account.rename.message",
+            fallback: "名前だけを変更します。紐づけ先や保存済みデータは変わりません。"
+        )
+        alert.addButton(withTitle: L10n.text("account.rename.confirm", fallback: "変更"))
+        alert.addButton(withTitle: L10n.text("common.cancel", fallback: "キャンセル"))
 
         let nameField = NSTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
         nameField.stringValue = account.name
@@ -1751,7 +2619,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             try launcher.renameAccount(id: account.id, to: nameField.stringValue)
             refreshUI()
         } catch {
-            presentError(error, title: "アカウント名を変更できませんでした")
+            presentError(
+                error,
+                title: L10n.text(
+                    "account.rename.error-title",
+                    fallback: "アカウント名を変更できませんでした"
+                )
+            )
         }
     }
 
@@ -1762,24 +2636,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             let accountID = UUID(uuidString: rawID),
             let account = launcher.accounts.first(where: { $0.id == accountID })
         else {
-            presentError(ProfileManagerError.accountNotFound, title: "アカウント登録を削除できませんでした")
+            presentError(
+                ProfileManagerError.accountNotFound,
+                title: L10n.text(
+                    "account.delete.error-title",
+                    fallback: "アカウント登録を削除できませんでした"
+                )
+            )
             return
         }
 
         guard account.id != launcher.existingEnvironmentAccount?.id else {
             presentError(
                 ProfileManagerError.linkedAccountCannotBeDeleted,
-                title: "アカウント登録を削除できませんでした"
+                title: L10n.text(
+                    "account.delete.error-title",
+                    fallback: "アカウント登録を削除できませんでした"
+                )
             )
             return
         }
 
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "「\(account.name)」の登録を削除しますか？"
-        alert.informativeText = "アカウントの登録だけを削除します。分離プロファイルの保存フォルダ、ログイン状態、設定、セッション、ログなどはそのまま残り、後からアカウント追加時に「既存の分離プロファイルを使う」を選ぶと、同じ保存先を再登録できます。既存環境は変更されません。"
-        alert.addButton(withTitle: "登録を削除")
-        alert.addButton(withTitle: "キャンセル")
+        alert.messageText = L10n.text(
+            "account.delete.title",
+            fallback: "「{name}」の登録を削除しますか？",
+            replacing: ["name": account.name]
+        )
+        alert.informativeText = L10n.text(
+            "account.delete.message",
+            fallback: "アカウントの登録だけを削除します。分離プロファイルの保存フォルダ、ログイン状態、設定、セッション、ログなどはそのまま残り、後からアカウント追加時に「既存の分離プロファイルを使う」を選ぶと、同じ保存先を再登録できます。既存環境は変更されません。"
+        )
+        alert.addButton(
+            withTitle: L10n.text("account.delete.confirm", fallback: "登録を削除")
+        )
+        alert.addButton(withTitle: L10n.text("common.cancel", fallback: "キャンセル"))
 
         guard alert.runModal() == .alertFirstButtonReturn else {
             return
@@ -1789,16 +2681,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             let deletedAccount = try launcher.removeIsolatedAccountRegistration(id: account.id)
             refreshUI()
             refreshUsage()
-            showTransientStatus("\(deletedAccount.name) の登録を削除しました。保存フォルダは保持されています。")
+            showTransientStatus(
+                L10n.text(
+                    "account.deleted.success",
+                    fallback: "{name} の登録を削除しました。保存フォルダは保持されています。",
+                    replacing: ["name": deletedAccount.name]
+                )
+            )
         } catch {
-            presentError(error, title: "アカウント登録を削除できませんでした")
+            presentError(
+                error,
+                title: L10n.text(
+                    "account.delete.error-title",
+                    fallback: "アカウント登録を削除できませんでした"
+                )
+            )
         }
     }
 
     @objc
-    private func switchAccount(_ sender: NSButton) {
+    private func openAccount(_ sender: NSButton) {
         guard
-            !isSwitching,
+            !isLaunching,
             let rawID = sender.identifier?.rawValue,
             let accountID = UUID(uuidString: rawID),
             let account = launcher.accounts.first(where: { $0.id == accountID })
@@ -1806,19 +2710,85 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             return
         }
 
-        isSwitching = true
-        showTransientStatus("\(account.name) へ切り替え中…")
+        isLaunching = true
+        showTransientStatus(
+            L10n.text(
+                "account.opening",
+                fallback: "{name} を起動中…",
+                replacing: ["name": account.name]
+            )
+        )
 
         Task { @MainActor [weak self] in
             guard let self else { return }
-            defer { self.isSwitching = false }
+            defer { self.isLaunching = false }
 
             do {
-                try await self.launcher.switchTo(accountID: accountID)
+                try await self.launcher.open(accountID: accountID)
                 self.refreshUI()
             } catch {
                 self.refreshUI()
                 self.presentError(error)
+            }
+        }
+    }
+
+    @objc
+    private func quitAccount(_ sender: NSButton) {
+        guard
+            !isLaunching,
+            let rawID = sender.identifier?.rawValue,
+            let accountID = UUID(uuidString: rawID),
+            let account = launcher.accounts.first(where: { $0.id == accountID }),
+            launcher.isAccountRunning(id: accountID)
+        else {
+            refreshUI()
+            return
+        }
+
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = L10n.text(
+            "account.quit.confirmation-title",
+            fallback: "「{name}」のChatGPTを終了しますか？",
+            replacing: ["name": account.name]
+        )
+        alert.informativeText = L10n.text(
+            "account.quit.confirmation-message",
+            fallback: "進行中の作業がある場合、中断される可能性があります。"
+        )
+        alert.addButton(withTitle: L10n.text("account.quit", fallback: "終了"))
+        alert.addButton(withTitle: L10n.text("common.cancel", fallback: "キャンセル"))
+
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            return
+        }
+
+        isLaunching = true
+        showTransientStatus(
+            L10n.text(
+                "account.quitting",
+                fallback: "{name} を終了中…",
+                replacing: ["name": account.name]
+            )
+        )
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.isLaunching = false }
+
+            do {
+                try await self.launcher.quit(accountID: accountID)
+                self.refreshUI()
+            } catch {
+                self.refreshUI()
+                self.presentError(
+                    error,
+                    title: L10n.text(
+                        "account.quit.error-title",
+                        fallback: "ChatGPTを終了できませんでした"
+                    )
+                )
             }
         }
     }
@@ -1834,20 +2804,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             )
             NSWorkspace.shared.open(directory)
         } catch {
-            presentError(error, title: "プロファイル保存先を開けませんでした")
+            presentError(
+                error,
+                title: L10n.text(
+                    "profiles.open-error-title",
+                    fallback: "プロファイル保存先を開けませんでした"
+                )
+            )
         }
     }
 
     private func presentError(
         _ error: Error,
-        title: String = "アカウントを切り替えられませんでした"
+        title: String? = nil
     ) {
         showMainWindow()
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = title
+        alert.messageText = title ?? L10n.text(
+            "account.open.error-title",
+            fallback: "アカウントを起動できませんでした"
+        )
         alert.informativeText = error.localizedDescription
-        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: L10n.text("common.ok", fallback: "OK"))
         alert.runModal()
     }
 }

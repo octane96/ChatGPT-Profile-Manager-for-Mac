@@ -94,23 +94,22 @@ enum ProfileManagerLocations {
 }
 
 struct CodexLaunchSpec: Equatable, Sendable {
-    let executableURL: URL
+    let applicationURL: URL
+    let environment: [String: String]
     let arguments: [String]
 
     init(appURL: URL, mode: ProfileLaunchMode) {
-        executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        applicationURL = appURL
         switch mode {
         case .existingDefault:
-            arguments = ["-n", appURL.path]
+            environment = [:]
+            arguments = []
         case let .isolated(paths):
-            arguments = [
-                "-n",
-                "--env", "CODEX_HOME=\(paths.codexHome.path)",
-                "--env", "CODEX_ELECTRON_USER_DATA_PATH=\(paths.electronUserData.path)",
-                appURL.path,
-                "--args",
-                "--user-data-dir=\(paths.electronUserData.path)"
+            environment = [
+                "CODEX_HOME": paths.codexHome.path,
+                "CODEX_ELECTRON_USER_DATA_PATH": paths.electronUserData.path
             ]
+            arguments = ["--user-data-dir=\(paths.electronUserData.path)"]
         }
     }
 }
@@ -123,7 +122,6 @@ enum ProfileLaunchMode: Equatable, Sendable {
 enum ProfileManagerError: LocalizedError, Equatable {
     case applicationSupportUnavailable
     case codexAppNotFound
-    case codexDidNotQuit
     case codexMustBeClosed
     case accountNotFound
     case linkedAccountCannotBeDeleted
@@ -133,36 +131,89 @@ enum ProfileManagerError: LocalizedError, Equatable {
     case profileDirectoryAlreadyAssigned
     case profileDirectoryNotFound
     case existingEnvironmentAlreadyAssigned
+    case profileAlreadyRunning
+    case runningProfileCannotBeIdentified
+    case chatGPTDidNotQuit
     case launchFailed(Int32)
 
     var errorDescription: String? {
         switch self {
         case .applicationSupportUnavailable:
-            return "プロファイルの保存先を取得できませんでした。"
+            return L10n.text(
+                "error.application-support-unavailable",
+                fallback: "プロファイルの保存先を取得できませんでした。"
+            )
         case .codexAppNotFound:
-            return "Codexデスクトップアプリが見つかりませんでした。"
-        case .codexDidNotQuit:
-            return "実行中のCodexを終了できませんでした。タスクを確認してから、もう一度お試しください。"
+            return L10n.text(
+                "error.chatgpt-app-not-found",
+                fallback: "ChatGPTデスクトップアプリが見つかりませんでした。"
+            )
         case .codexMustBeClosed:
-            return "設定をやり直す前に、実行中のCodexを終了してください。ChatGPT Profile Managerは終了せず、そのまま再実行できます。"
+            return L10n.text(
+                "error.chatgpt-must-be-closed",
+                fallback: "このプロファイルを使用中のChatGPTを終了してから、登録情報を変更してください。"
+            )
         case .accountNotFound:
-            return "選択したアカウントが見つかりませんでした。"
+            return L10n.text(
+                "error.account-not-found",
+                fallback: "選択したアカウントが見つかりませんでした。"
+            )
         case .linkedAccountCannotBeDeleted:
-            return "既存のCodex環境に紐づいたアカウントは削除できません。先に紐づけ登録を外してください。"
+            return L10n.text(
+                "error.existing-account-cannot-be-deleted",
+                fallback: "ChatGPTの既存環境に紐づいたアカウントは削除できません。"
+            )
         case .invalidAccountName:
-            return "アカウント名を1文字以上60文字以内で入力してください。"
+            return L10n.text(
+                "error.invalid-account-name",
+                fallback: "アカウント名を1文字以上60文字以内で入力してください。"
+            )
         case .duplicateAccountName:
-            return "同じ名前のアカウントがすでに登録されています。別の名前を入力してください。"
+            return L10n.text(
+                "error.duplicate-account-name",
+                fallback: "同じ名前のアカウントがすでに登録されています。別の名前を入力してください。"
+            )
         case .invalidProfileDirectory:
-            return "分離プロファイルの保存先名が無効です。"
+            return L10n.text(
+                "error.invalid-profile-directory",
+                fallback: "分離プロファイルの保存先名が無効です。"
+            )
         case .profileDirectoryAlreadyAssigned:
-            return "その分離プロファイルは、すでに別のアカウントへ紐づいています。"
+            return L10n.text(
+                "error.profile-directory-already-assigned",
+                fallback: "その分離プロファイルは、すでに別のアカウントへ紐づいています。"
+            )
         case .profileDirectoryNotFound:
-            return "選択した分離プロファイルが見つかりませんでした。"
+            return L10n.text(
+                "error.profile-directory-not-found",
+                fallback: "選択した分離プロファイルが見つかりませんでした。"
+            )
         case .existingEnvironmentAlreadyAssigned:
-            return "既存のCodex環境は、すでに別のアカウントへ固定されています。"
+            return L10n.text(
+                "error.existing-environment-already-assigned",
+                fallback: "ChatGPTの既存環境は、すでに別のアカウントへ固定されています。"
+            )
+        case .profileAlreadyRunning:
+            return L10n.text(
+                "error.profile-already-running",
+                fallback: "このプロファイルはすでに起動中です。同じ保存先を使うChatGPTは複数起動できません。"
+            )
+        case .runningProfileCannotBeIdentified:
+            return L10n.text(
+                "error.running-profile-cannot-be-identified",
+                fallback: "終了するChatGPTを一意に特定できませんでした。対象のChatGPTを直接終了してください。"
+            )
+        case .chatGPTDidNotQuit:
+            return L10n.text(
+                "error.chatgpt-did-not-quit",
+                fallback: "ChatGPTが終了しませんでした。進行中の確認画面などがないか、ChatGPT側を確認してください。"
+            )
         case let .launchFailed(status):
-            return "Codexの起動に失敗しました（終了コード: \(status)）。"
+            return L10n.text(
+                "error.chatgpt-launch-failed",
+                fallback: "ChatGPTの起動に失敗しました（終了コード: {status}）。",
+                replacing: ["status": "\(status)"]
+            )
         }
     }
 }

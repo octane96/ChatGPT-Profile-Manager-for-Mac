@@ -3,6 +3,56 @@ import XCTest
 @testable import ChatGPTProfileManager
 
 final class ChatGPTProfileManagerTests: XCTestCase {
+    func testLanguageResolutionUsesJapaneseOnlyWhenItIsThePrimaryMacLanguage() {
+        XCTAssertEqual(
+            AppLanguage.resolve(preferredLanguages: ["ja-JP", "en-US"]),
+            .japanese
+        )
+        XCTAssertEqual(
+            AppLanguage.resolve(preferredLanguages: ["JA_jp"]),
+            .japanese
+        )
+        XCTAssertEqual(
+            AppLanguage.resolve(preferredLanguages: ["en-US", "ja-JP"]),
+            .english
+        )
+        XCTAssertEqual(
+            AppLanguage.resolve(preferredLanguages: ["fr-FR", "ja-JP"]),
+            .english
+        )
+        XCTAssertEqual(
+            AppLanguage.resolve(preferredLanguages: []),
+            .english
+        )
+    }
+
+    func testLanguagePreferenceDefaultsToAutomaticAndSupportsOverrides() throws {
+        let suiteName = "ChatGPTProfileManagerLanguageTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        XCTAssertEqual(AppLanguagePreference.saved(in: defaults), .automatic)
+        XCTAssertEqual(
+            AppLanguagePreference.automatic.resolve(preferredLanguages: ["ja-JP"]),
+            .japanese
+        )
+        XCTAssertEqual(
+            AppLanguagePreference.automatic.resolve(preferredLanguages: ["de-DE"]),
+            .english
+        )
+        XCTAssertEqual(
+            AppLanguagePreference.japanese.resolve(preferredLanguages: ["en-US"]),
+            .japanese
+        )
+        XCTAssertEqual(
+            AppLanguagePreference.english.resolve(preferredLanguages: ["ja-JP"]),
+            .english
+        )
+
+        AppLanguagePreference.english.save(in: defaults)
+        XCTAssertEqual(AppLanguagePreference.saved(in: defaults), .english)
+    }
+
     func testNewDirectoryNameIncludesReadableNameAndStableSuffix() {
         let id = UUID(uuidString: "48008583-e670-4656-979e-50ea198b9093")!
         let account = AccountProfile(id: id, name: "開発 チーム")
@@ -35,12 +85,11 @@ final class ChatGPTProfileManagerTests: XCTestCase {
         let appURL = URL(fileURLWithPath: "/Applications/Codex.app")
         let spec = CodexLaunchSpec(appURL: appURL, mode: .isolated(paths))
 
-        XCTAssertEqual(spec.executableURL.path, "/usr/bin/open")
-        XCTAssertTrue(spec.arguments.contains("CODEX_HOME=\(paths.codexHome.path)"))
-        XCTAssertTrue(
-            spec.arguments.contains(
-                "CODEX_ELECTRON_USER_DATA_PATH=\(paths.electronUserData.path)"
-            )
+        XCTAssertEqual(spec.applicationURL, appURL)
+        XCTAssertEqual(spec.environment["CODEX_HOME"], paths.codexHome.path)
+        XCTAssertEqual(
+            spec.environment["CODEX_ELECTRON_USER_DATA_PATH"],
+            paths.electronUserData.path
         )
         XCTAssertTrue(
             spec.arguments.contains("--user-data-dir=\(paths.electronUserData.path)")
@@ -133,10 +182,92 @@ final class ChatGPTProfileManagerTests: XCTestCase {
         let appURL = URL(fileURLWithPath: "/Applications/Codex.app")
         let spec = CodexLaunchSpec(appURL: appURL, mode: .existingDefault)
 
-        XCTAssertEqual(spec.executableURL.path, "/usr/bin/open")
-        XCTAssertEqual(spec.arguments, ["-n", appURL.path])
-        XCTAssertFalse(spec.arguments.contains(where: { $0.contains("CODEX_HOME") }))
+        XCTAssertEqual(spec.applicationURL, appURL)
+        XCTAssertEqual(spec.environment, [:])
+        XCTAssertEqual(spec.arguments, [])
         XCTAssertFalse(spec.arguments.contains(where: { $0.contains("user-data-dir") }))
+    }
+
+    func testRunningProfileRegistryPrunesExitedProcessesAndPreventsDuplicates() throws {
+        let (store, defaults, suiteName) = try makeStore()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let first = try store.addAccount(
+            named: "分離プロファイル1",
+            linkToExistingEnvironment: false
+        )
+        let second = try store.addAccount(
+            named: "分離プロファイル2",
+            linkToExistingEnvironment: false
+        )
+
+        store.setRunningProfileInstance(accountID: first.id, processIdentifier: 101)
+        store.setRunningProfileInstance(accountID: first.id, processIdentifier: 102)
+        store.setRunningProfileInstance(accountID: second.id, processIdentifier: 202)
+
+        XCTAssertEqual(
+            store.activeRunningProfileInstances(processIdentifiers: [102, 202]),
+            [first.id: 102, second.id: 202]
+        )
+        XCTAssertEqual(
+            store.activeRunningProfileInstances(processIdentifiers: [202]),
+            [second.id: 202]
+        )
+    }
+
+    func testUnknownChatGPTInstanceIsTreatedAsExistingEnvironment() throws {
+        let (store, defaults, suiteName) = try makeStore()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let existing = try store.addAccount(
+            named: "既存環境",
+            linkToExistingEnvironment: true
+        )
+        let isolated = try store.addAccount(
+            named: "分離環境",
+            linkToExistingEnvironment: false
+        )
+        store.setRunningProfileInstance(accountID: isolated.id, processIdentifier: 202)
+
+        XCTAssertEqual(
+            store.runningAccountIDs(processIdentifiers: [202]),
+            [isolated.id]
+        )
+        XCTAssertEqual(
+            store.runningAccountIDs(processIdentifiers: [101, 202]),
+            [existing.id, isolated.id]
+        )
+        XCTAssertEqual(
+            store.runningProcessIdentifier(
+                for: existing.id,
+                processIdentifiers: [101, 202]
+            ),
+            101
+        )
+        XCTAssertEqual(
+            store.runningProcessIdentifier(
+                for: isolated.id,
+                processIdentifiers: [101, 202]
+            ),
+            202
+        )
+    }
+
+    func testExistingEnvironmentQuitTargetRequiresOneUnassignedProcess() throws {
+        let (store, defaults, suiteName) = try makeStore()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let existing = try store.addAccount(
+            named: "既存環境",
+            linkToExistingEnvironment: true
+        )
+
+        XCTAssertNil(
+            store.runningProcessIdentifier(
+                for: existing.id,
+                processIdentifiers: [101, 102]
+            )
+        )
     }
 
     func testCreateDirectoriesBuildsPrivateProfileLayout() throws {

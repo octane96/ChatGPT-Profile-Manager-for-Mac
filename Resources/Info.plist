@@ -8,6 +8,13 @@
     <string>ChatGPTProfileManager</string>
     <key>CFBundleIdentifier</key>
     <string>com.local.chatgpt-profile-manager</string>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>ja</string>
+    <key>CFBundleLocalizations</key>
+    <array>
+        <string>ja</string>
+        <string>en</string>
+    </array>
     <key>CFBundleIconFile</key>
     <string>AppIcon.icns</string>
     <key>CFBundleInfoDictionaryVersion</key>
