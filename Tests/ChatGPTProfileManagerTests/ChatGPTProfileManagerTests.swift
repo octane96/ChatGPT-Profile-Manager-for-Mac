@@ -96,6 +96,99 @@ final class ChatGPTProfileManagerTests: XCTestCase {
         )
     }
 
+    func testProfileLauncherURLRoundTripsAccountID() {
+        let accountID = UUID(uuidString: "48008583-e670-4656-979e-50ea198b9093")!
+        let url = ProfileLauncherURL.url(for: accountID)
+
+        XCTAssertEqual(url.scheme, "chatgpt-profile-manager")
+        XCTAssertEqual(url.host, "launch")
+        XCTAssertEqual(ProfileLauncherURL.accountID(from: url), accountID)
+        let externalLaunchURL = URL(
+            string: url.absoluteString + "&pid=1234"
+        )!
+        XCTAssertEqual(
+            ProfileLauncherURL.processIdentifier(from: externalLaunchURL),
+            1234
+        )
+        XCTAssertNil(
+            ProfileLauncherURL.processIdentifier(
+                from: URL(string: url.absoluteString + "&pid=0")!
+            )
+        )
+        XCTAssertNil(
+            ProfileLauncherURL.accountID(
+                from: URL(string: "chatgpt-profile-manager://launch?profile=not-a-uuid")!
+            )
+        )
+    }
+
+    func testProfileLauncherInitialsRecognizeCamelCaseAndWordSeparators() {
+        XCTAssertEqual(ProfileLauncherIconGenerator.initials(for: "ShareFair"), "SF")
+        XCTAssertEqual(ProfileLauncherIconGenerator.initials(for: "share-fair"), "SF")
+        XCTAssertEqual(ProfileLauncherIconGenerator.initials(for: "share_fair"), "SF")
+        XCTAssertEqual(ProfileLauncherIconGenerator.initials(for: "share fair"), "SF")
+        XCTAssertEqual(ProfileLauncherIconGenerator.initials(for: "sharefair"), "SH")
+    }
+
+    func testProfileLauncherGeneratesStableApplicationBundle() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let accountID = UUID(uuidString: "48008583-e670-4656-979e-50ea198b9093")!
+        let account = AccountProfile(id: accountID, name: "開発 チーム")
+        let launcherURL = try ProfileLauncherStore(baseDirectory: root).generate(for: account)
+
+        XCTAssertEqual(
+            launcherURL.lastPathComponent,
+            "ChatGPT 開発 チーム.app"
+        )
+        let bundle = try XCTUnwrap(Bundle(url: launcherURL))
+        XCTAssertEqual(
+            bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String,
+            "ChatGPT 開発 チーム"
+        )
+        XCTAssertEqual(
+            bundle.object(forInfoDictionaryKey: "CFBundleName") as? String,
+            "ChatGPT 開発 チーム"
+        )
+        XCTAssertEqual(
+            bundle.object(forInfoDictionaryKey: "ChatGPTProfileManagerAccountID") as? String,
+            accountID.uuidString
+        )
+        XCTAssertEqual(
+            bundle.object(forInfoDictionaryKey: "CFBundleIdentifier") as? String,
+            "com.local.chatgpt-profile-manager.launcher.48008583e6704656979e50ea198b9093"
+        )
+        let script = try String(
+            contentsOf: launcherURL.appendingPathComponent("Contents/MacOS/LaunchProfile"),
+            encoding: .utf8
+        )
+        let expectedCodexHome = "export CODEX_HOME='" + root.path
+            + "/Profiles/" + account.directoryName + "/CodexHome'"
+        let expectedElectronUserData = "export CODEX_ELECTRON_USER_DATA_PATH='" + root.path
+            + "/Profiles/" + account.directoryName + "/ElectronUserData'"
+        XCTAssertTrue(script.contains(expectedCodexHome))
+        XCTAssertTrue(script.contains(expectedElectronUserData))
+        XCTAssertTrue(
+            script.contains(
+                "\"$CHATGPT_EXECUTABLE\" \"--user-data-dir=$CODEX_ELECTRON_USER_DATA_PATH\" &"
+            )
+        )
+        XCTAssertTrue(
+            script.contains(
+                "MARKER_DIRECTORY='" + root.path + "/Launchers/.running'"
+            )
+        )
+        XCTAssertTrue(
+            script.contains(
+                "MARKER_FILE=\"$MARKER_DIRECTORY/\(accountID.uuidString).pid\""
+            )
+        )
+        XCTAssertTrue(script.contains("CHATGPT_PID=$!"))
+        XCTAssertTrue(script.contains("printf '%s\\n' \"$CHATGPT_PID\""))
+        XCTAssertTrue(script.contains(ProfileLauncherURL.url(for: accountID).absoluteString))
+    }
+
     func testAccountUsageSnapshotParsesFiveHourAndWeeklyWindows() throws {
         let response = Data(
             #"""

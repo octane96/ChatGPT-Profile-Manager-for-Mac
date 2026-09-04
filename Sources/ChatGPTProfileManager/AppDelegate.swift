@@ -83,6 +83,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     private weak var settingsLanguagePopup: NSPopUpButton?
     private var storageChoiceButtons: [NSButton] = []
     private var usageByAccountID: [UUID: AccountUsageSnapshot] = [:]
+    private let accountRowHeight: CGFloat = 192
+    private var editingAccountID: UUID?
+    private weak var editingNameField: NSTextField?
     private var usageRefreshTask: Task<Void, Never>?
     private var isRebuildingInterface = false
     private var isLaunching = false {
@@ -138,6 +141,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         }
 
         refreshUI()
+        // A direct profile launcher writes its PID marker immediately after
+        // ChatGPT is spawned. Retry once after LaunchServices has published
+        // the new process so the account row reflects the external launch.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            self?.refreshUI()
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(
@@ -417,7 +426,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
 
         let tableView = NSTableView()
         tableView.headerView = nil
-        tableView.rowHeight = 156
+        tableView.rowHeight = accountRowHeight
         tableView.intercellSpacing = NSSize(width: 0, height: 0)
         tableView.selectionHighlightStyle = .none
         tableView.backgroundColor = .clear
@@ -643,7 +652,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
 
     private func updateTableHeight(accountCount: Int) {
         let visibleRowCount = max(accountCount, 1)
-        let desiredHeight = CGFloat(visibleRowCount * 156 + 1)
+        let desiredHeight = CGFloat(visibleRowCount) * accountRowHeight + 1
         tableHeightConstraint?.constant = min(max(desiredHeight, 76), 420)
     }
 
@@ -691,9 +700,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         NSLayoutConstraint.activate([
             rowStack.leadingAnchor.constraint(equalTo: rowCard.leadingAnchor, constant: 10),
             rowStack.trailingAnchor.constraint(equalTo: rowCard.trailingAnchor, constant: -10),
-            rowStack.topAnchor.constraint(equalTo: rowCard.topAnchor, constant: 6),
-            rowStack.bottomAnchor.constraint(equalTo: rowCard.bottomAnchor, constant: -6)
+            rowStack.topAnchor.constraint(equalTo: rowCard.topAnchor, constant: 8),
+            rowStack.bottomAnchor.constraint(equalTo: rowCard.bottomAnchor, constant: -8)
         ])
+
+        let infoStack = NSStackView()
+        infoStack.orientation = .horizontal
+        infoStack.alignment = .top
+        infoStack.spacing = 6
+        infoStack.translatesAutoresizingMaskIntoConstraints = false
+        infoStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        rowStack.addArrangedSubview(infoStack)
 
         let labels = NSStackView()
         labels.orientation = .vertical
@@ -740,17 +757,123 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             dragHandle.widthAnchor.constraint(equalToConstant: 22),
             dragHandle.heightAnchor.constraint(equalToConstant: 22)
         ])
-        rowStack.addArrangedSubview(dragContainer)
-
-        let nameLabel = NSTextField(labelWithString: account.name)
-        nameLabel.font = .systemFont(ofSize: 15, weight: .semibold)
-        nameLabel.lineBreakMode = .byTruncatingTail
-        nameLabel.maximumNumberOfLines = 1
-        labels.addArrangedSubview(nameLabel)
+        infoStack.addArrangedSubview(dragContainer)
 
         let isExisting = account.id == launcher.existingEnvironmentAccount?.id
         let isRunning = launcher.isAccountRunning(id: account.id)
         let usageSnapshot = usageByAccountID[account.id]
+
+        if editingAccountID == account.id {
+            let nameEditorStack = NSStackView()
+            nameEditorStack.orientation = .horizontal
+            nameEditorStack.alignment = .centerY
+            nameEditorStack.spacing = 4
+
+            let nameField = NSTextField(frame: .zero)
+            nameField.stringValue = account.name
+            nameField.font = .systemFont(ofSize: 15, weight: .semibold)
+            nameField.lineBreakMode = .byTruncatingTail
+            nameField.maximumNumberOfLines = 1
+            nameField.translatesAutoresizingMaskIntoConstraints = false
+            nameField.widthAnchor.constraint(greaterThanOrEqualToConstant: 110).isActive = true
+            nameField.widthAnchor.constraint(lessThanOrEqualToConstant: 200).isActive = true
+            nameField.heightAnchor.constraint(greaterThanOrEqualToConstant: 26).isActive = true
+            nameField.identifier = NSUserInterfaceItemIdentifier(account.id.uuidString)
+            nameField.target = self
+            nameField.action = #selector(commitInlineRename(_:))
+            nameEditorStack.addArrangedSubview(nameField)
+
+            let saveButton = NSButton(
+                title: L10n.text("account.rename.save", fallback: "保存"),
+                target: self,
+                action: #selector(saveInlineRename(_:))
+            )
+            saveButton.bezelStyle = .rounded
+            saveButton.controlSize = .small
+            saveButton.image = NSImage(
+                systemSymbolName: "checkmark",
+                accessibilityDescription: nil
+            )
+            saveButton.imagePosition = .imageLeading
+            saveButton.contentTintColor = .systemGreen
+            saveButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 52).isActive = true
+            saveButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 26).isActive = true
+            saveButton.setAccessibilityLabel(
+                L10n.text(
+                    "account.rename.save-accessibility-label",
+                    fallback: "{name}の名前を保存",
+                    replacing: ["name": account.name]
+                )
+            )
+            saveButton.toolTip = L10n.text(
+                "account.rename.save-tooltip",
+                fallback: "名前を保存"
+            )
+            saveButton.identifier = NSUserInterfaceItemIdentifier(account.id.uuidString)
+            nameEditorStack.addArrangedSubview(saveButton)
+
+            let cancelButton = NSButton(
+                title: L10n.text("account.rename.cancel", fallback: "キャンセル"),
+                target: self,
+                action: #selector(cancelInlineRename(_:))
+            )
+            cancelButton.bezelStyle = .rounded
+            cancelButton.controlSize = .small
+            cancelButton.image = NSImage(
+                systemSymbolName: "xmark",
+                accessibilityDescription: nil
+            )
+            cancelButton.imagePosition = .imageLeading
+            cancelButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 72).isActive = true
+            cancelButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 26).isActive = true
+            cancelButton.setAccessibilityLabel(
+                L10n.text(
+                    "account.rename.cancel-accessibility-label",
+                    fallback: "{name}の名前の編集をキャンセル",
+                    replacing: ["name": account.name]
+                )
+            )
+            cancelButton.toolTip = L10n.text(
+                "account.rename.cancel-tooltip",
+                fallback: "名前の編集をキャンセル"
+            )
+            cancelButton.identifier = NSUserInterfaceItemIdentifier(account.id.uuidString)
+            nameEditorStack.addArrangedSubview(cancelButton)
+
+            labels.addArrangedSubview(nameEditorStack)
+            editingNameField = nameField
+        } else {
+            let nameStack = NSStackView()
+            nameStack.orientation = .horizontal
+            nameStack.alignment = .centerY
+            nameStack.spacing = 4
+
+            let nameLabel = NSTextField(labelWithString: account.name)
+            nameLabel.font = .systemFont(ofSize: 15, weight: .semibold)
+            nameLabel.lineBreakMode = .byTruncatingTail
+            nameLabel.maximumNumberOfLines = 1
+            nameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            nameStack.addArrangedSubview(nameLabel)
+
+            let editButton = makeAccountIconButton(
+                systemName: "pencil",
+                accessibilityLabel: L10n.text(
+                    "account.rename.accessibility-label",
+                    fallback: "{name}の名前を編集",
+                    replacing: ["name": account.name]
+                ),
+                toolTip: L10n.text(
+                    "account.rename.tooltip",
+                    fallback: "名前を編集"
+                ),
+                action: #selector(beginRenameAccount(_:))
+            )
+            editButton.identifier = NSUserInterfaceItemIdentifier(account.id.uuidString)
+            nameStack.addArrangedSubview(editButton)
+
+            labels.addArrangedSubview(nameStack)
+        }
+
         let metadataStack = NSStackView()
         metadataStack.orientation = .horizontal
         metadataStack.alignment = .centerY
@@ -854,30 +977,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             : account.directoryName
         directoryLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         labels.addArrangedSubview(directoryLabel)
-        rowStack.addArrangedSubview(labels)
+        infoStack.addArrangedSubview(labels)
 
-        let spacer = NSView()
-        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        rowStack.addArrangedSubview(spacer)
+        let actionsStack = NSStackView()
+        actionsStack.orientation = .vertical
+        actionsStack.alignment = .trailing
+        actionsStack.spacing = 4
+        actionsStack.translatesAutoresizingMaskIntoConstraints = false
+        actionsStack.setContentHuggingPriority(.required, for: .horizontal)
+        actionsStack.setContentHuggingPriority(.required, for: .vertical)
+        actionsStack.setContentCompressionResistancePriority(.required, for: .horizontal)
+        actionsStack.setContentCompressionResistancePriority(.required, for: .vertical)
+        rowStack.addArrangedSubview(actionsStack)
 
-        let renameButton = NSButton(
-            title: L10n.text("account.rename", fallback: "名前を変更"),
-            target: self,
-            action: #selector(renameAccount(_:))
-        )
-        renameButton.bezelStyle = .inline
-        renameButton.controlSize = .regular
-        renameButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 64).isActive = true
-        renameButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 28).isActive = true
-        renameButton.identifier = NSUserInterfaceItemIdentifier(account.id.uuidString)
-        renameButton.setAccessibilityLabel(
-            L10n.text(
-                "account.rename.accessibility-label",
-                fallback: "{name}の名前を変更",
-                replacing: ["name": account.name]
-            )
-        )
-        rowStack.addArrangedSubview(renameButton)
+        let primaryActionsRow = NSStackView()
+        primaryActionsRow.orientation = .horizontal
+        primaryActionsRow.alignment = .centerY
+        primaryActionsRow.spacing = 6
+        primaryActionsRow.setContentCompressionResistancePriority(.required, for: .horizontal)
+        actionsStack.addArrangedSubview(primaryActionsRow)
+
+        let managementActionsRow: NSStackView
+        if isExisting {
+            // The existing environment has no launcher or delete action, so keep
+            // its available controls together in one compact row.
+            managementActionsRow = primaryActionsRow
+        } else {
+            let secondaryActionsRow = NSStackView()
+            secondaryActionsRow.orientation = .horizontal
+            secondaryActionsRow.alignment = .centerY
+            secondaryActionsRow.distribution = .fill
+            secondaryActionsRow.spacing = 6
+            secondaryActionsRow.setContentCompressionResistancePriority(.required, for: .horizontal)
+            actionsStack.addArrangedSubview(secondaryActionsRow)
+            let secondaryActionsSpacer = NSView()
+            secondaryActionsSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            secondaryActionsSpacer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            secondaryActionsRow.addArrangedSubview(secondaryActionsSpacer)
+            // Add the row to the stack before activating this constraint so both
+            // rows already share a common ancestor in AppKit's layout tree.
+            secondaryActionsRow.widthAnchor.constraint(equalTo: primaryActionsRow.widthAnchor).isActive = true
+            managementActionsRow = secondaryActionsRow
+        }
 
         let settingsButton = NSButton(
             title: L10n.text("settings-sharing.manage", fallback: "設定"),
@@ -896,7 +1037,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                 replacing: ["name": account.name]
             )
         )
-        rowStack.addArrangedSubview(settingsButton)
+        managementActionsRow.addArrangedSubview(settingsButton)
+
+        if !isExisting {
+            let hasLauncher = launcher.hasProfileLauncher(for: account)
+            let launcherButton = NSButton(
+                title: L10n.text(
+                    hasLauncher ? "launcher.update" : "launcher.generate",
+                    fallback: hasLauncher ? "起動アプリを更新" : "起動アプリを作成"
+                ),
+                target: self,
+                action: #selector(generateProfileLauncher(_:))
+            )
+            launcherButton.bezelStyle = .inline
+            launcherButton.controlSize = .regular
+            launcherButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 132).isActive = true
+            launcherButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 28).isActive = true
+            launcherButton.identifier = NSUserInterfaceItemIdentifier(account.id.uuidString)
+            launcherButton.image = NSImage(
+                systemSymbolName: "dock.rectangle",
+                accessibilityDescription: nil
+            )
+            launcherButton.imagePosition = .imageLeading
+            launcherButton.setAccessibilityLabel(
+                L10n.text(
+                    hasLauncher
+                        ? "launcher.update.accessibility-label"
+                        : "launcher.generate.accessibility-label",
+                    fallback: hasLauncher
+                        ? "{name}の起動アプリを更新"
+                        : "{name}の起動アプリを作成",
+                    replacing: ["name": account.name]
+                )
+            )
+            launcherButton.toolTip = L10n.text(
+                "launcher.tooltip",
+                fallback: "プロファイル専用の起動アプリを作成"
+            )
+            primaryActionsRow.addArrangedSubview(launcherButton)
+        }
 
         let openButton = NSButton(
             title: isRunning
@@ -940,37 +1119,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                 fallback: "このプロファイルのChatGPTを終了"
             )
             : nil
-        rowStack.addArrangedSubview(openButton)
-
-        if !isExisting {
-            let deleteButton = NSButton(
-                title: L10n.text("account.delete", fallback: "削除"),
-                target: self,
-                action: #selector(deleteAccount(_:))
-            )
-            deleteButton.bezelStyle = .inline
-            deleteButton.controlSize = .regular
-            deleteButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 52).isActive = true
-            deleteButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 28).isActive = true
-            deleteButton.contentTintColor = .systemRed
-            deleteButton.identifier = NSUserInterfaceItemIdentifier(account.id.uuidString)
-            deleteButton.hasDestructiveAction = true
-            deleteButton.isEnabled = !isLaunching && !isRunning
-            deleteButton.setAccessibilityLabel(
-                L10n.text(
-                    "account.delete.accessibility-label",
-                    fallback: "{name}の登録を削除",
-                    replacing: ["name": account.name]
-                )
-            )
-            deleteButton.toolTip = L10n.text(
-                "account.delete.tooltip",
-                fallback: "アカウント登録だけを削除（保存先は保持）"
-            )
-            rowStack.addArrangedSubview(deleteButton)
-        }
+        primaryActionsRow.addArrangedSubview(openButton)
 
         return cell
+    }
+
+    private func makeAccountIconButton(
+        systemName: String,
+        accessibilityLabel: String,
+        toolTip: String,
+        action: Selector
+    ) -> NSButton {
+        let button = NSButton(
+            image: NSImage(
+                systemSymbolName: systemName,
+                accessibilityDescription: accessibilityLabel
+            ) ?? NSImage(),
+            target: self,
+            action: action
+        )
+        button.bezelStyle = .inline
+        button.controlSize = .regular
+        button.isBordered = false
+        button.imagePosition = .imageOnly
+        button.contentTintColor = .secondaryLabelColor
+        button.widthAnchor.constraint(equalToConstant: 26).isActive = true
+        button.heightAnchor.constraint(equalToConstant: 26).isActive = true
+        button.setAccessibilityLabel(accessibilityLabel)
+        button.toolTip = toolTip
+        return button
     }
 
     private func makeUsageLabel(
@@ -1255,6 +1432,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                 fallback: "設定をコピー"
             )
         )
+        let canDelete = account.id != launcher.existingEnvironmentAccount?.id
+        let isDeleteEnabled = canDelete
+            && !launcher.isAccountRunning(id: account.id)
+            && !isLaunching
+        if canDelete {
+            let deleteButton = alert.addButton(
+                withTitle: L10n.text(
+                    "account.delete.settings",
+                    fallback: "プロファイルを削除"
+                )
+            )
+            deleteButton.image = NSImage(
+                systemSymbolName: "trash",
+                accessibilityDescription: nil
+            )
+            deleteButton.imagePosition = .imageLeading
+            deleteButton.hasDestructiveAction = true
+            deleteButton.contentTintColor = .systemRed
+            deleteButton.isEnabled = isDeleteEnabled
+            deleteButton.toolTip = isDeleteEnabled
+                ? nil
+                : L10n.text(
+                    "account.delete.settings-disabled",
+                    fallback: "ChatGPTを終了してから削除できます"
+                )
+        }
         alert.addButton(withTitle: L10n.text("common.cancel", fallback: "キャンセル"))
 
         switch alert.runModal() {
@@ -1266,6 +1469,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             }
         case .alertSecondButtonReturn:
             presentCopySettings(destinationAccountID: accountID)
+        case .alertThirdButtonReturn where isDeleteEnabled:
+            deleteAccountRegistration(accountID: accountID)
         default:
             break
         }
@@ -2326,7 +2531,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                     content,
                     L10n.text(
                         "guide.organize.list-body",
-                        fallback: "「名前を変更」は表示名だけを変更します。行をドラッグすると表示順だけを変更します。\n\n"
+                        fallback: "名前の横にある鉛筆アイコンでは表示名だけを変更できます。行をドラッグすると表示順だけを変更できます。\n\n"
                     ),
                     font: bodyFont,
                     paragraphStyle: bodyParagraphStyle
@@ -2406,6 +2611,71 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                     ),
                     font: bodyFont,
                     paragraphStyle: bodyParagraphStyle
+                )
+            },
+            makeGuidePage(
+                title: L10n.text("guide.launcher.title", fallback: "Dockから直接起動する")
+            ) { content in
+                appendGuideText(
+                    content,
+                    L10n.text(
+                        "guide.launcher.generate-heading",
+                        fallback: "起動アプリを作成する\n"
+                    ),
+                    font: sectionFont,
+                    paragraphStyle: sectionParagraphStyle
+                )
+                appendGuideText(
+                    content,
+                    L10n.text(
+                        "guide.launcher.generate-body",
+                        fallback: "分離プロファイルの行にある「起動アプリを作成」を押すと、そのプロファイル専用の起動アプリを作成します。作成後にFinderで表示し、Dockへドラッグして追加してください。すでに作成済みの場合は「起動アプリを更新」と表示されます。ChatGPTの既存環境にはChatGPTアプリ自身のDock機能があるため、このボタンは表示されません。\n\n"
+                    ),
+                    font: bodyFont,
+                    paragraphStyle: bodyParagraphStyle
+                )
+                appendGuideText(
+                    content,
+                    L10n.text(
+                        "guide.launcher.icon-heading",
+                        fallback: "アイコンで見分ける\n"
+                    ),
+                    font: sectionFont,
+                    paragraphStyle: sectionParagraphStyle
+                )
+                appendGuideText(
+                    content,
+                    L10n.text(
+                        "guide.launcher.icon-body",
+                        fallback: "起動アプリごとにプロファイル名、色・頭文字付きのアイコンを生成します。キャメルケース、空白、ハイフン、アンダースコアを単語の区切りとして認識するため、ShareFair、share-fair、share_fairはいずれもSFになります。単語が1つだけの場合は先頭2文字を使います。アカウント名を変更した後は「起動アプリを更新」を押すと名前、表示名、アイコンを更新できます。\n\n"
+                    ),
+                    font: bodyFont,
+                    paragraphStyle: bodyParagraphStyle
+                )
+                appendGuideText(
+                    content,
+                    L10n.text(
+                        "guide.launcher.behavior-heading",
+                        fallback: "起動時の動作\n"
+                    ),
+                    font: sectionFont,
+                    paragraphStyle: sectionParagraphStyle
+                )
+                appendGuideText(
+                    content,
+                    L10n.text(
+                        "guide.launcher.behavior-body",
+                        fallback: "起動アプリは分離プロファイルの保存先を指定してChatGPTを直接起動します。ChatGPTが標準の場所にない場合は、互換用にChatGPT Profile Managerへ処理を引き継ぎます。別プロファイルは並列起動できますが、同じ保存先は二重起動できません。ChatGPTの既存環境は起動アプリの対象外です。起動アプリはプロファイル名を使った名前で保存されます。\n\n"
+                    ),
+                    font: bodyFont,
+                    paragraphStyle: bodyParagraphStyle
+                )
+                appendGuideCode(
+                    content,
+                    L10n.text(
+                        "guide.launcher.location-tree",
+                        fallback: "~/Library/Application Support/\n└── ChatGPT Profile Manager/\n    └── Launchers/\n        └── ChatGPT <プロファイル名>.app"
+                    )
                 )
             },
             makeGuidePage(
@@ -2541,7 +2811,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                     content,
                     L10n.text(
                         "guide.safety.registration-body",
-                        fallback: "初回起動時に既存環境が見つかると、メールアドレスを表示名にして自動登録します。登録後も「名前を変更」から表示名だけ変更できます。\n\n"
+                        fallback: "初回起動時に既存環境が見つかると、メールアドレスを表示名にして自動登録します。登録後も名前の横にある鉛筆アイコンから表示名だけ変更できます。\n\n"
                     ),
                     font: bodyFont,
                     paragraphStyle: bodyParagraphStyle
@@ -3153,42 +3423,91 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     }
 
     @objc
-    private func renameAccount(_ sender: NSButton) {
+    private func beginRenameAccount(_ sender: NSButton) {
         guard
             let rawID = sender.identifier?.rawValue,
             let accountID = UUID(uuidString: rawID),
-            let account = launcher.accounts.first(where: { $0.id == accountID })
+            launcher.accounts.contains(where: { $0.id == accountID })
         else {
             presentError(ProfileManagerError.accountNotFound)
             return
         }
 
-        let alert = NSAlert()
-        alert.alertStyle = .informational
-        alert.messageText = L10n.text(
-            "account.rename.title",
-            fallback: "アカウント名を変更します"
-        )
-        alert.informativeText = L10n.text(
-            "account.rename.message",
-            fallback: "名前だけを変更します。紐づけ先や保存済みデータは変わりません。"
-        )
-        alert.addButton(withTitle: L10n.text("account.rename.confirm", fallback: "変更"))
-        alert.addButton(withTitle: L10n.text("common.cancel", fallback: "キャンセル"))
+        editingAccountID = accountID
+        editingNameField = nil
+        tableView?.reloadData()
 
-        let nameField = NSTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
-        nameField.stringValue = account.name
-        alert.accessoryView = nameField
-        alert.window.initialFirstResponder = nameField
+        DispatchQueue.main.async { [weak self] in
+            guard
+                let self,
+                self.editingAccountID == accountID,
+                let nameField = self.editingNameField
+            else {
+                return
+            }
+            self.window?.makeFirstResponder(nameField)
+            nameField.selectText(nil)
+        }
+    }
 
-        guard alert.runModal() == .alertFirstButtonReturn else {
+    @objc
+    private func saveInlineRename(_ sender: NSButton) {
+        guard
+            let rawID = sender.identifier?.rawValue,
+            let accountID = UUID(uuidString: rawID),
+            let nameField = editingNameField,
+            nameField.identifier?.rawValue == rawID
+        else {
+            presentError(ProfileManagerError.accountNotFound)
+            return
+        }
+
+        finishInlineRename(accountID: accountID, newName: nameField.stringValue)
+    }
+
+    @objc
+    private func commitInlineRename(_ sender: NSTextField) {
+        guard
+            let rawID = sender.identifier?.rawValue,
+            let accountID = UUID(uuidString: rawID)
+        else {
+            presentError(ProfileManagerError.accountNotFound)
+            return
+        }
+
+        finishInlineRename(accountID: accountID, newName: sender.stringValue)
+    }
+
+    @objc
+    private func cancelInlineRename(_ sender: NSButton) {
+        guard
+            let rawID = sender.identifier?.rawValue,
+            UUID(uuidString: rawID) != nil
+        else {
+            presentError(ProfileManagerError.accountNotFound)
+            return
+        }
+
+        editingAccountID = nil
+        editingNameField = nil
+        tableView?.reloadData()
+    }
+
+    private func finishInlineRename(accountID: UUID, newName: String) {
+        guard launcher.accounts.contains(where: { $0.id == accountID }) else {
+            editingAccountID = nil
+            editingNameField = nil
+            presentError(ProfileManagerError.accountNotFound)
             return
         }
 
         do {
-            try launcher.renameAccount(id: account.id, to: nameField.stringValue)
+            try launcher.renameAccount(id: accountID, to: newName)
+            editingAccountID = nil
+            editingNameField = nil
             refreshUI()
         } catch {
+            // Keep the editor open so the user can correct an invalid or duplicate name.
             presentError(
                 error,
                 title: L10n.text(
@@ -3199,13 +3518,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         }
     }
 
-    @objc
-    private func deleteAccount(_ sender: NSButton) {
-        guard
-            let rawID = sender.identifier?.rawValue,
-            let accountID = UUID(uuidString: rawID),
-            let account = launcher.accounts.first(where: { $0.id == accountID })
-        else {
+    private func deleteAccountRegistration(accountID: UUID) {
+        guard let account = launcher.accounts.first(where: { $0.id == accountID }) else {
             presentError(
                 ProfileManagerError.accountNotFound,
                 title: L10n.text(
@@ -3239,7 +3553,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             fallback: "アカウントの登録だけを削除します。分離プロファイルの保存フォルダ、ログイン状態、設定、セッション、ログなどはそのまま残り、後からアカウント追加時に「既存の分離プロファイルを使う」を選ぶと、同じ保存先を再登録できます。既存環境は変更されません。"
         )
         alert.addButton(
-            withTitle: L10n.text("account.delete.confirm", fallback: "登録を削除")
+            withTitle: L10n.text("account.delete.confirm", fallback: "プロファイルを削除")
         )
         alert.addButton(withTitle: L10n.text("common.cancel", fallback: "キャンセル"))
 
@@ -3270,13 +3584,87 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     }
 
     @objc
+    private func generateProfileLauncher(_ sender: NSButton) {
+        guard
+            let rawID = sender.identifier?.rawValue,
+            let accountID = UUID(uuidString: rawID),
+            let account = launcher.accounts.first(where: { $0.id == accountID })
+        else {
+            presentError(ProfileManagerError.accountNotFound)
+            return
+        }
+
+        do {
+            let launcherURL = try launcher.generateProfileLauncher(for: accountID)
+            let alert = NSAlert()
+            alert.alertStyle = .informational
+            alert.messageText = L10n.text(
+                "launcher.generated-title",
+                fallback: "起動アプリを作成しました"
+            )
+            alert.informativeText = L10n.text(
+                "launcher.generated-message",
+                fallback: "「{name}」専用の起動アプリを作成しました。Finderで表示し、Dockへドラッグすると、このプロファイルを直接起動できます。",
+                replacing: ["name": account.name]
+            )
+            alert.addButton(
+                withTitle: L10n.text(
+                    "launcher.show-in-finder",
+                    fallback: "Finderで表示"
+                )
+            )
+            alert.addButton(withTitle: L10n.text("common.ok", fallback: "OK"))
+            if alert.runModal() == .alertFirstButtonReturn {
+                NSWorkspace.shared.activateFileViewerSelecting([launcherURL])
+            }
+            refreshUI()
+        } catch {
+            presentError(
+                error,
+                title: L10n.text(
+                    "launcher.error.title",
+                    fallback: "起動アプリを作成できませんでした"
+                )
+            )
+        }
+    }
+
+    @objc
     private func openAccount(_ sender: NSButton) {
         guard
             !isLaunching,
             let rawID = sender.identifier?.rawValue,
             let accountID = UUID(uuidString: rawID),
-            let account = launcher.accounts.first(where: { $0.id == accountID })
+            launcher.accounts.contains(where: { $0.id == accountID })
         else {
+            return
+        }
+
+        launchAccount(accountID)
+    }
+
+    private func launchAccountFromLauncher(_ accountID: UUID) {
+        launchAccount(accountID)
+    }
+
+    private func launchAccount(_ accountID: UUID) {
+        guard !isLaunching else {
+            showTransientStatus(
+                L10n.text(
+                    "launcher.busy",
+                    fallback: "別のプロファイルを起動中です。しばらく待ってから再試行してください。"
+                )
+            )
+            return
+        }
+        guard let account = launcher.accounts.first(where: { $0.id == accountID }) else {
+            presentError(
+                ProfileManagerError.accountNotFound,
+                title: L10n.text(
+                    "launcher.error.title",
+                    fallback: "起動アプリを実行できませんでした"
+                )
+            )
             return
         }
 
@@ -3398,5 +3786,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         alert.informativeText = error.localizedDescription
         alert.addButton(withTitle: L10n.text("common.ok", fallback: "OK"))
         alert.runModal()
+    }
+}
+
+extension AppDelegate {
+    func application(_ application: NSApplication, open urls: [URL]) -> Bool {
+        let accountIDs = urls.compactMap(ProfileLauncherURL.accountID(from:))
+        guard !accountIDs.isEmpty else {
+            return false
+        }
+
+        // Older generated launchers forward a custom URL to the manager. Keep
+        // that compatibility path, but do not leave the manager window in
+        // front when the user's intent was to launch ChatGPT.
+        window?.orderOut(nil)
+        for accountID in accountIDs {
+            launchAccountFromLauncher(accountID)
+        }
+        return true
     }
 }

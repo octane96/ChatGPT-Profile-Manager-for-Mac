@@ -27,6 +27,17 @@
 	<string>1.0.0</string>
     <key>CFBundleVersion</key>
 	<string>2</string>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>ChatGPT Profile Manager profile launcher</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>chatgpt-profile-manager</string>
+            </array>
+        </dict>
+    </array>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>NSHumanReadableCopyright</key>

@@ -199,12 +199,15 @@ final class CodexLauncher {
     }
 
     var runningAccountIDs: Set<UUID> {
+        let processIdentifiers = Set(
+            runningChatGPTApplications.map(\.processIdentifier)
+        )
+        synchronizeExternalLaunchMarkers(processIdentifiers: processIdentifiers)
+
         // An instance not started by this version of the manager is
         // conservatively treated as the default, existing environment.
-        stateStore.runningAccountIDs(
-            processIdentifiers: Set(
-                runningChatGPTApplications.map(\.processIdentifier)
-            )
+        return stateStore.runningAccountIDs(
+            processIdentifiers: processIdentifiers
         )
     }
 
@@ -299,6 +302,27 @@ final class CodexLauncher {
             return []
         }
         return SettingsSharingStore(baseDirectory: baseDirectory).loadRegistry().groups
+    }
+
+    func profileLauncherURL(for account: AccountProfile) -> URL? {
+        guard let baseDirectory = try? profileBaseDirectory() else {
+            return nil
+        }
+        return ProfileLauncherStore(baseDirectory: baseDirectory).launcherURL(for: account)
+    }
+
+    func hasProfileLauncher(for account: AccountProfile) -> Bool {
+        guard let baseDirectory = try? profileBaseDirectory() else {
+            return false
+        }
+        return ProfileLauncherStore(baseDirectory: baseDirectory).hasLauncher(for: account)
+    }
+
+    @discardableResult
+    func generateProfileLauncher(for accountID: UUID) throws -> URL {
+        let account = try account(for: accountID)
+        let baseDirectory = try profileBaseDirectory()
+        return try ProfileLauncherStore(baseDirectory: baseDirectory).generate(for: account)
     }
 
     @discardableResult
@@ -442,6 +466,7 @@ final class CodexLauncher {
 
         let applications = runningChatGPTApplications
         let processIdentifiers = Set(applications.map(\.processIdentifier))
+        synchronizeExternalLaunchMarkers(processIdentifiers: processIdentifiers)
         guard let processIdentifier = stateStore.runningProcessIdentifier(
             for: accountID,
             processIdentifiers: processIdentifiers
@@ -486,6 +511,70 @@ final class CodexLauncher {
 
         let fallback = URL(fileURLWithPath: "/Applications/ChatGPT.app")
         return fileManager.fileExists(atPath: fallback.path) ? fallback : nil
+    }
+
+    /// Direct profile launchers run ChatGPT without keeping the manager in the
+    /// process tree. They leave a short-lived PID marker so the manager can
+    /// associate that ChatGPT instance with the correct profile when it is
+    /// already open or is opened later.
+    private func synchronizeExternalLaunchMarkers(
+        processIdentifiers: Set<Int32>
+    ) {
+        guard let baseDirectory = try? profileBaseDirectory() else {
+            return
+        }
+        let markerDirectory = ProfileLauncherStore.runningMarkerDirectory(
+            baseDirectory: baseDirectory
+        )
+        guard let markerURLs = try? fileManager.contentsOfDirectory(
+            at: markerDirectory,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return
+        }
+
+        let now = Date()
+        for markerURL in markerURLs where markerURL.pathExtension == "pid" {
+            guard
+                let accountID = UUID(
+                    uuidString: markerURL.deletingPathExtension().lastPathComponent
+                ),
+                let account = stateStore.account(id: accountID),
+                let pidText = try? String(
+                    contentsOf: markerURL,
+                    encoding: .utf8
+                ),
+                let processIdentifier = Int32(
+                    pidText.trimmingCharacters(in: .whitespacesAndNewlines)
+                ),
+                processIdentifier > 0
+            else {
+                try? fileManager.removeItem(at: markerURL)
+                continue
+            }
+
+            if processIdentifiers.contains(processIdentifier) {
+                stateStore.setRunningProfileInstance(
+                    accountID: accountID,
+                    processIdentifier: processIdentifier
+                )
+                stateStore.setLastLaunchedAccount(account)
+                continue
+            }
+
+            // The shell launcher removes its marker on exit. Keep a brief
+            // grace period for the launch race where ChatGPT has not yet
+            // appeared in NSWorkspace's process list.
+            let modifiedAt = (try? markerURL.resourceValues(
+                forKeys: [.contentModificationDateKey]
+            ).contentModificationDate) ?? nil
+            if let modifiedAt,
+               now.timeIntervalSince(modifiedAt) < 15 {
+                continue
+            }
+            try? fileManager.removeItem(at: markerURL)
+        }
     }
 
     private func emailFromToken(_ token: String) -> String? {
