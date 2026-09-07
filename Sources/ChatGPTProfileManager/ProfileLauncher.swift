@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import Foundation
 
 enum ProfileLauncherURL {
@@ -61,12 +62,12 @@ struct ProfileLauncherError: LocalizedError, Equatable {
         case .generation:
             return L10n.text(
                 "launcher.error.generation",
-                fallback: "起動アプリを作成できませんでした。"
+                fallback: "プロファイル起動用アプリを作成できませんでした。"
             )
         case .signing:
             return L10n.text(
                 "launcher.error.signing",
-                fallback: "起動アプリの署名に失敗しました。"
+                fallback: "プロファイル起動用アプリの署名に失敗しました。"
             )
         }
     }
@@ -101,6 +102,79 @@ final class ProfileLauncherStore {
             .appendingPathComponent(".running", isDirectory: true)
     }
 
+    static func runningLockURL(baseDirectory: URL, profileID: UUID) -> URL {
+        runningMarkerDirectory(baseDirectory: baseDirectory)
+            .appendingPathComponent("\(profileID.uuidString).lock", isDirectory: true)
+    }
+
+    /// Reclaims a lock left by a forcibly terminated launcher only when the
+    /// recorded process is no longer running and the lock directory is empty.
+    /// rmdir (rather than recursive removal) preserves any unexpected data so
+    /// a stale marker can never delete user files.
+    func recoverStaleRunningLock(for account: AccountProfile) {
+        let lockDirectory = Self.runningLockURL(baseDirectory: baseDirectory, profileID: account.profileID)
+        guard fileManager.fileExists(atPath: lockDirectory.path) else { return }
+        let marker = Self.runningMarkerDirectory(baseDirectory: baseDirectory)
+            .appendingPathComponent("\(account.id.uuidString).pid", isDirectory: false)
+        // A direct launcher has its owner PID in the account marker while a
+        // UI launch records it in the lock's owner file. Never reclaim either
+        // kind while its process is alive. Malformed/unknown lock contents
+        // remain untouched for manual inspection.
+        let processIsActive: (Int32) -> Bool = { processIdentifier in
+            guard processIdentifier > 0 else { return false }
+            let result = kill(processIdentifier, 0)
+            return result == 0 || errno == EPERM
+        }
+        if let markerText = try? String(contentsOf: marker, encoding: .utf8),
+           let processIdentifier = Int32(markerText.trimmingCharacters(in: .whitespacesAndNewlines)),
+           processIsActive(processIdentifier) {
+            return
+        }
+        // A newly-created empty lock may be between mkdir and its PID write.
+        // Only that ambiguous state gets a short grace period. Once an owner
+        // PID exists, a dead process can be reclaimed immediately so normal
+        // UI synchronization does not leave a finished launch blocked.
+        let ownerURL = lockDirectory.appendingPathComponent(ProfileFileLock.ownerFileName, isDirectory: false)
+        if !fileManager.fileExists(atPath: ownerURL.path),
+           let createdAt = try? lockDirectory.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate,
+           Date().timeIntervalSince(createdAt) < 15 {
+            return
+        }
+        let status = ProfileFileLock.statusOwned(
+            at: lockDirectory,
+            fileManager: fileManager,
+            isProcessActive: processIsActive
+        )
+        guard status == .stale else { return }
+        _ = ProfileFileLock.recoverStaleOwned(
+            at: lockDirectory,
+            fileManager: fileManager,
+            isProcessActive: processIsActive
+        )
+    }
+
+    @discardableResult
+    func releaseRunningLock(for account: AccountProfile) -> Bool {
+        let url = Self.runningLockURL(baseDirectory: baseDirectory, profileID: account.profileID)
+        let marker = Self.runningMarkerDirectory(baseDirectory: baseDirectory)
+            .appendingPathComponent("\(account.id.uuidString).pid", isDirectory: false)
+        if let markerText = try? String(contentsOf: marker, encoding: .utf8),
+           let processIdentifier = Int32(markerText.trimmingCharacters(in: .whitespacesAndNewlines)),
+           processIdentifier > 0 {
+            let result = kill(processIdentifier, 0)
+            if result == 0 || errno == EPERM {
+                return false
+            }
+        }
+        return ProfileFileLock.releaseOwned(
+            at: url,
+            fileManager: fileManager
+        ) || ProfileFileLock.releaseEmpty(
+            at: url,
+            fileManager: fileManager
+        )
+    }
+
     func launcherURL(for account: AccountProfile) -> URL {
         existingLauncherURL(for: account) ?? preferredLauncherURL(for: account)
     }
@@ -110,7 +184,7 @@ final class ProfileLauncherStore {
     }
 
     @discardableResult
-    func generate(for account: AccountProfile) throws -> URL {
+    func generate(for account: AccountProfile, createProfileDirectories: Bool = true) throws -> URL {
         try fileManager.createDirectory(
             at: launchersDirectory,
             withIntermediateDirectories: true,
@@ -144,10 +218,22 @@ final class ProfileLauncherStore {
                 withIntermediateDirectories: true,
                 attributes: [.posixPermissions: 0o700]
             )
-            try ProfilePaths(
+            let profilePaths = ProfilePaths(
                 profile: account,
                 baseDirectory: baseDirectory
-            ).createDirectories(fileManager: fileManager)
+            )
+            if createProfileDirectories {
+                try profilePaths.createDirectories(fileManager: fileManager)
+            } else {
+                var isDirectory: ObjCBool = false
+                var isCodexHomeDirectory: ObjCBool = false
+                var isElectronDirectory: ObjCBool = false
+                guard fileManager.fileExists(atPath: profilePaths.root.path, isDirectory: &isDirectory), isDirectory.boolValue,
+                      fileManager.fileExists(atPath: profilePaths.codexHome.path, isDirectory: &isCodexHomeDirectory), isCodexHomeDirectory.boolValue,
+                      fileManager.fileExists(atPath: profilePaths.electronUserData.path, isDirectory: &isElectronDirectory), isElectronDirectory.boolValue else {
+                    throw ProfileManagerError.profileRootMissing
+                }
+            }
             try writeInfoPlist(for: account, to: contents.appendingPathComponent("Info.plist"))
             try writeLaunchScript(for: account, to: executableURL)
             try writeIcon(for: account, to: resources)
@@ -199,6 +285,8 @@ final class ProfileLauncherStore {
         let paths = ProfilePaths(profile: account, baseDirectory: baseDirectory)
         let profileHome = shellQuote(paths.codexHome.path)
         let electronUserData = shellQuote(paths.electronUserData.path)
+        let identityMarker = shellQuote(paths.markerURL().path)
+        let maintenanceLock = shellQuote(paths.maintenanceLockURL().path)
         let runningMarkerDirectory = shellQuote(
             Self.runningMarkerDirectory(baseDirectory: baseDirectory).path
         )
@@ -222,12 +310,42 @@ final class ProfileLauncherStore {
             "if [ -x \"$CHATGPT_EXECUTABLE\" ]; then",
             "    MARKER_DIRECTORY=\(runningMarkerDirectory)",
             "    MARKER_FILE=\"$MARKER_DIRECTORY/\(account.id.uuidString).pid\"",
+            "    LOCK_DIRECTORY=\"$MARKER_DIRECTORY/\(account.profileID.uuidString).lock\"",
+            "    OWNER_FILE=\"$LOCK_DIRECTORY/\(ProfileFileLock.ownerFileName)\"",
+            "    if [ -d \(maintenanceLock) ]; then",
+            "        exec /usr/bin/open -b \(managerBundle) \(shellQuote(ProfileLauncherURL.url(for: account.id).absoluteString))",
+            "    fi",
+            "    if [ ! -d \"$CODEX_HOME\" ] || [ ! -d \"$CODEX_ELECTRON_USER_DATA_PATH\" ]; then",
+            "        exec /usr/bin/open -b \(managerBundle) \(shellQuote(ProfileLauncherURL.url(for: account.id).absoluteString))",
+            "    fi",
+            "    PROFILE_MARKER=\(identityMarker)",
+            "    if [ ! -f \"$PROFILE_MARKER\" ]; then",
+            "        exec /usr/bin/open -b \(managerBundle) \(shellQuote(ProfileLauncherURL.url(for: account.id).absoluteString))",
+            "    fi",
+            "    MARKER_VERSION=$(/usr/bin/plutil -extract version raw -o - \"$PROFILE_MARKER\" 2>/dev/null || true)",
+            "    MARKER_PROFILE_ID=$(/usr/bin/plutil -extract profileID raw -o - \"$PROFILE_MARKER\" 2>/dev/null || true)",
+            "    if [ \"$MARKER_VERSION\" != \"\(ProfileIdentityMarker.currentVersion)\" ] || [ \"$MARKER_PROFILE_ID\" != \"\(account.profileID.uuidString)\" ]; then",
+            "        exec /usr/bin/open -b \(managerBundle) \(shellQuote(ProfileLauncherURL.url(for: account.id).absoluteString))",
+            "    fi",
+            "    if [ -d \"$LOCK_DIRECTORY\" ]; then",
+            "        ACTIVE_PID=",
+            "        if [ -r \"$OWNER_FILE\" ]; then ACTIVE_PID=$(/bin/cat \"$OWNER_FILE\"); elif [ -r \"$MARKER_FILE\" ]; then ACTIVE_PID=$(/bin/cat \"$MARKER_FILE\"); fi",
+            "        case \"$ACTIVE_PID\" in *[!0-9]*|\"\") exit 73 ;; esac",
+            "        if /bin/kill -0 \"$ACTIVE_PID\" 2>/dev/null; then",
+            "            exit 73",
+            "        fi",
+            "        /usr/bin/unlink \"$OWNER_FILE\" 2>/dev/null || true",
+            "        /bin/rmdir \"$LOCK_DIRECTORY\" 2>/dev/null || exit 73",
+            "    fi",
             "    /bin/mkdir -p \"$MARKER_DIRECTORY\"",
             "    /bin/chmod 700 \"$MARKER_DIRECTORY\"",
+            "    if ! /bin/mkdir \"$LOCK_DIRECTORY\" 2>/dev/null; then",
+            "        exit 73",
+            "    fi",
             "    \"$CHATGPT_EXECUTABLE\" \"--user-data-dir=$CODEX_ELECTRON_USER_DATA_PATH\" &",
             "    CHATGPT_PID=$!",
             "    /usr/bin/printf '%s\\n' \"$CHATGPT_PID\" > \"$MARKER_FILE\"",
-            "    trap '/bin/rm -f \"$MARKER_FILE\"' EXIT HUP INT TERM",
+            "    trap '/bin/rm -f \"$MARKER_FILE\"; /usr/bin/unlink \"$OWNER_FILE\" 2>/dev/null || true; /bin/rmdir \"$LOCK_DIRECTORY\" 2>/dev/null || true' EXIT HUP INT TERM",
             "    wait \"$CHATGPT_PID\"",
             "    exit $?",
             "fi",

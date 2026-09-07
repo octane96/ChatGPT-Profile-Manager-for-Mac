@@ -164,7 +164,10 @@ struct ProfileStateStore {
     func addAccount(
         named name: String,
         linkToExistingEnvironment: Bool,
-        directoryName: String? = nil
+        directoryName: String? = nil,
+        profileID: UUID? = nil,
+        lastKnownPath: String? = nil,
+        bookmarkData: Data? = nil
     ) throws -> AccountProfile {
         let normalizedName = try validateNewAccountName(name)
         var currentAccounts = accounts
@@ -187,9 +190,17 @@ struct ProfileStateStore {
             normalizedDirectoryName = nil
         }
 
+        if let profileID,
+           currentAccounts.contains(where: { $0.profileID == profileID }) {
+            throw ProfileManagerError.profileDirectoryAlreadyAssigned
+        }
+
         let account = AccountProfile(
             name: normalizedName,
-            directoryName: normalizedDirectoryName
+            profileID: profileID,
+            directoryName: normalizedDirectoryName,
+            lastKnownPath: lastKnownPath,
+            bookmarkData: bookmarkData
         )
         currentAccounts.append(account)
         try saveAccounts(currentAccounts)
@@ -199,6 +210,49 @@ struct ProfileStateStore {
         }
 
         return account
+    }
+
+    /// Updates only the locator for an isolated profile. The stable profileID
+    /// and registration id never change when a folder is moved.
+    func updateProfileLocation(
+        id: UUID,
+        path: URL,
+        bookmarkData: Data? = nil
+    ) throws {
+        var currentAccounts = accounts
+        guard let index = currentAccounts.firstIndex(where: { $0.id == id }) else {
+            throw ProfileManagerError.accountNotFound
+        }
+        guard currentAccounts[index].id != existingEnvironmentAccountID else {
+            throw ProfileManagerError.invalidProfileDirectory
+        }
+        guard path.standardizedFileURL.path.hasPrefix("/") else {
+            throw ProfileManagerError.invalidProfileDirectory
+        }
+        currentAccounts[index].lastKnownPath = path.standardizedFileURL.path
+        currentAccounts[index].bookmarkData = bookmarkData
+        try saveAccounts(currentAccounts)
+    }
+
+    /// Replaces a legacy profile locator with the stable profile identity read
+    /// from its on-disk marker. This is intentionally idempotent.
+    func updateProfileIdentity(id: UUID, profileID: UUID) throws {
+        var currentAccounts = accounts
+        guard let index = currentAccounts.firstIndex(where: { $0.id == id }) else {
+            throw ProfileManagerError.accountNotFound
+        }
+        guard !currentAccounts.contains(where: { $0.id != id && $0.profileID == profileID }) else {
+            throw ProfileManagerError.profileDirectoryAlreadyAssigned
+        }
+        currentAccounts[index] = AccountProfile(
+            id: currentAccounts[index].id,
+            name: currentAccounts[index].name,
+            profileID: profileID,
+            directoryName: currentAccounts[index].directoryName,
+            lastKnownPath: currentAccounts[index].lastKnownPath,
+            bookmarkData: currentAccounts[index].bookmarkData
+        )
+        try saveAccounts(currentAccounts)
     }
 
     func renameAccount(id: UUID, to name: String) throws {

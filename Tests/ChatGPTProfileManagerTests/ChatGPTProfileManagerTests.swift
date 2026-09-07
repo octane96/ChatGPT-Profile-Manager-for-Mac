@@ -1,4 +1,5 @@
 import Foundation
+import SQLite3
 import XCTest
 @testable import ChatGPTProfileManager
 
@@ -76,6 +77,369 @@ final class ChatGPTProfileManagerTests: XCTestCase {
                 "/Profiles/account-two/ElectronUserData"
             )
         )
+    }
+
+    func testLegacyAccountDecodingUsesRegistrationIDAsProfileID() throws {
+        let id = UUID(uuidString: "11111111-1111-4111-8111-111111111111")!
+        let legacy = #"{"id":"11111111-1111-4111-8111-111111111111","name":"Legacy","directoryName":"account-legacy"}"#
+        let account = try JSONDecoder().decode(AccountProfile.self, from: Data(legacy.utf8))
+        XCTAssertEqual(account.id, id)
+        XCTAssertEqual(account.profileID, id)
+        XCTAssertNil(account.lastKnownPath)
+    }
+
+    func testProfileIdentityMarkerRoundTripsWithoutSensitiveFields() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let profileID = UUID()
+        let paths = ProfilePaths(root: root)
+        try paths.ensureMarker(profileID: profileID)
+        let marker = try XCTUnwrap(paths.readMarker())
+        XCTAssertEqual(marker.profileID, profileID)
+        XCTAssertEqual(marker.version, ProfileIdentityMarker.currentVersion)
+        let text = try String(contentsOf: paths.markerURL())
+        XCTAssertFalse(text.contains("token"))
+        XCTAssertFalse(text.contains("cookie"))
+    }
+
+    func testInvalidOrUnsupportedMarkerIsNeverOverwritten() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = ProfilePaths(root: root)
+        let invalid = Data("{\"version\":1,\"profileID\":\"not-a-uuid\"}".utf8)
+        try invalid.write(to: paths.markerURL())
+        XCTAssertEqual(paths.readMarkerState(), .invalid)
+        XCTAssertThrowsError(try paths.ensureMarker(profileID: UUID())) { error in
+            XCTAssertEqual(error as? ProfileManagerError, .profileMarkerMismatch)
+        }
+        XCTAssertEqual(try Data(contentsOf: paths.markerURL()), invalid)
+
+        let profileID = UUID()
+        let unsupported = Data("{\"version\":99,\"profileID\":\"\(profileID.uuidString)\",\"createdAt\":\"2026-01-01T00:00:00Z\"}".utf8)
+        try unsupported.write(to: paths.markerURL(), options: .atomic)
+        guard case .unsupported = paths.readMarkerState() else {
+            return XCTFail("expected unsupported marker state")
+        }
+        XCTAssertThrowsError(try paths.ensureMarker(profileID: profileID)) { error in
+            XCTAssertEqual(error as? ProfileManagerError, .profileMarkerMismatch)
+        }
+        XCTAssertEqual(try Data(contentsOf: paths.markerURL()), unsupported)
+    }
+
+    func testDiagnosticsDetectsMissingRootWithoutCreatingIt() throws {
+        let managerRoot = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: managerRoot) }
+        let account = AccountProfile(name: "Missing", profileID: UUID(), directoryName: "missing")
+        let report = ProfileDiagnosticsService(baseDirectory: managerRoot).diagnose(profile: account)
+        XCTAssertEqual(report.status, ProfileDiagnosticStatus.missing)
+        XCTAssertTrue(report.findings.contains(where: { $0.code == "root.missing" }))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: ProfilePaths(profile: account, baseDirectory: managerRoot).root.path))
+    }
+
+    @MainActor
+    func testInvalidMarkerBlocksMigrationRelocationAndExternalRegistration() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let managerRootParent = root.appendingPathComponent("support", isDirectory: true)
+        let managerRoot = managerRootParent.appendingPathComponent("ChatGPT Profile Manager", isDirectory: true)
+        try FileManager.default.createDirectory(at: managerRoot, withIntermediateDirectories: true)
+        let suiteName = "ChatGPTProfileManagerInvalidMarker-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let stateStore = ProfileStateStore(defaults: defaults)
+        let account = try stateStore.addAccount(named: "Invalid", linkToExistingEnvironment: false, directoryName: "invalid")
+        let paths = ProfilePaths(profile: account, baseDirectory: managerRoot)
+        try paths.createDirectories()
+        let invalid = Data("{\"version\":1,\"profileID\":\"bad\"}".utf8)
+        try invalid.write(to: paths.markerURL())
+        let launcher = CodexLauncher(stateStore: stateStore, applicationSupportDirectory: managerRootParent)
+        XCTAssertEqual(stateStore.account(id: account.id)?.profileID, account.profileID)
+        XCTAssertEqual(try Data(contentsOf: paths.markerURL()), invalid)
+        XCTAssertThrowsError(try launcher.updateProfileLocation(id: account.id, root: paths.root)) { error in
+            XCTAssertEqual(error as? ProfileManagerError, .profileMarkerMismatch)
+        }
+
+        let external = root.appendingPathComponent("external-invalid", isDirectory: true)
+        let externalPaths = ProfilePaths(root: external)
+        try externalPaths.createDirectories()
+        try invalid.write(to: externalPaths.markerURL())
+        XCTAssertThrowsError(try launcher.registerIsolatedProfile(named: "External", root: external)) { error in
+            XCTAssertEqual(error as? ProfileManagerError, .profileMarkerMismatch)
+        }
+        XCTAssertEqual(stateStore.accounts.count, 1)
+    }
+
+    func testDiagnosticsReadsManagerLevelSettingsRegistryAndBrokenRulesLink() throws {
+        let managerRoot = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: managerRoot) }
+        let account = AccountProfile(name: "Settings", profileID: UUID(), directoryName: "settings")
+        let paths = ProfilePaths(profile: account, baseDirectory: managerRoot)
+        try paths.createDirectories()
+        try paths.ensureMarker(profileID: account.profileID)
+        let settingsStore = SettingsSharingStore(baseDirectory: managerRoot)
+        var registry = SettingsRegistry()
+        registry.bindings = [SettingsBinding(profile: .isolatedProfile(profileID: account.profileID), groupID: UUID(), items: [.instructions])]
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(registry).write(to: settingsStore.registryURL)
+        try FileManager.default.createSymbolicLink(atPath: paths.codexHome.appendingPathComponent("rules").path, withDestinationPath: "/missing/rules")
+
+        let report = ProfileDiagnosticsService(baseDirectory: managerRoot).diagnose(profile: account)
+        XCTAssertEqual(settingsStore.registryURL, managerRoot.appendingPathComponent("SettingsRegistry.json"))
+        XCTAssertEqual(report.checks["settingsReference"], true)
+        XCTAssertTrue(report.findings.contains(where: { $0.code == "settings.symlink-broken" }))
+    }
+
+    func testDiagnosticsRepairsOnlyUnambiguousSQLiteRolloutPathAndWritesLog() throws {
+        let managerRoot = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: managerRoot) }
+        let account = AccountProfile(name: "Repair", profileID: UUID(), directoryName: "repair")
+        let paths = ProfilePaths(profile: account, baseDirectory: managerRoot)
+        try paths.createDirectories()
+        try paths.ensureMarker(profileID: account.profileID)
+        let sessionID = UUID().uuidString
+        let jsonl = paths.codexHome.appendingPathComponent("rollout-1.jsonl")
+        try Data(#"{"type":"session_meta","payload":{"id":"\#(sessionID)"}}"#.utf8).write(to: jsonl)
+        let sqlite = paths.codexHome.appendingPathComponent("state_5.sqlite")
+        try createFixtureSQLite(at: sqlite, sessionID: sessionID, rolloutPath: "/old/location/rollout-1.jsonl")
+        let snapshots = managerRoot.appendingPathComponent("snapshots", isDirectory: true)
+        let logs = managerRoot.appendingPathComponent("logs", isDirectory: true)
+        let service = ProfileDiagnosticsService(baseDirectory: managerRoot, recoverySnapshotsDirectory: snapshots, diagnosticsLogsDirectory: logs)
+        let before = service.diagnose(profile: account)
+        XCTAssertTrue(before.findings.contains(where: { $0.code == "sqlite.missing-rollout" }))
+        let result = try service.repairIndex(profile: account)
+        XCTAssertTrue(result.success)
+        XCTAssertFalse(result.rolledBack)
+        XCTAssertEqual(result.updatedPathCount, 1)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: result.snapshotDirectory.appendingPathComponent("state_5.sqlite").path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: result.logURL.path))
+        let after = service.diagnose(profile: account)
+        XCTAssertFalse(after.findings.contains(where: { $0.code == "sqlite.missing-rollout" }))
+        let log = try XCTUnwrap(service.readLog(at: result.logURL))
+        XCTAssertEqual(log.profileID, account.profileID)
+        XCTAssertEqual(log.result, "success")
+    }
+
+    func testDiagnosticsRefusesRepairWhenProfileIsMarkedRunning() throws {
+        let managerRoot = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: managerRoot) }
+        let account = AccountProfile(name: "Busy", profileID: UUID(), directoryName: "busy")
+        let paths = ProfilePaths(profile: account, baseDirectory: managerRoot)
+        try paths.createDirectories()
+        try paths.ensureMarker(profileID: account.profileID)
+        try createFixtureSQLite(at: paths.codexHome.appendingPathComponent("state_5.sqlite"), sessionID: UUID().uuidString, rolloutPath: "/missing")
+        let service = ProfileDiagnosticsService(baseDirectory: managerRoot, isChatGPTRunning: { true })
+        XCTAssertThrowsError(try service.repairIndex(profile: account)) { error in
+            XCTAssertEqual(error as? ProfileManagerError, .codexMustBeClosed)
+        }
+    }
+
+    func testDiagnosticsLeavesUnknownSQLiteSchemaUnchanged() throws {
+        let managerRoot = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: managerRoot) }
+        let account = AccountProfile(name: "Unknown", profileID: UUID(), directoryName: "unknown")
+        let paths = ProfilePaths(profile: account, baseDirectory: managerRoot)
+        try paths.createDirectories()
+        try paths.ensureMarker(profileID: account.profileID)
+        let sqlite = paths.codexHome.appendingPathComponent("state_99.sqlite")
+        try executeSQLite(at: sqlite, sql: "CREATE TABLE not_threads(value TEXT); PRAGMA user_version = 99;")
+        let service = ProfileDiagnosticsService(baseDirectory: managerRoot)
+        let report = service.diagnose(profile: account)
+        XCTAssertTrue(report.findings.contains(where: { $0.code == "sqlite.unknown-schema" }))
+        XCTAssertThrowsError(try service.repairIndex(profile: account)) { error in
+            XCTAssertEqual(error as? ProfileManagerError, .unknownProfileSchema)
+        }
+    }
+
+    func testDiagnosticsRejectsFutureSqlxMigrationSchema() throws {
+        let managerRoot = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: managerRoot) }
+        let account = AccountProfile(name: "Future", profileID: UUID(), directoryName: "future")
+        let paths = ProfilePaths(profile: account, baseDirectory: managerRoot)
+        try paths.createDirectories()
+        try paths.ensureMarker(profileID: account.profileID)
+        let sessionID = UUID().uuidString
+        try Data(#"{"type":"session_meta","payload":{"id":"\#(sessionID)"}}"#.utf8).write(to: paths.codexHome.appendingPathComponent("future.jsonl"))
+        let sqlite = paths.codexHome.appendingPathComponent("state_53.sqlite")
+        try executeSQLite(at: sqlite, sql: "CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT); CREATE TABLE _sqlx_migrations (version BIGINT PRIMARY KEY, success BOOLEAN NOT NULL); INSERT INTO _sqlx_migrations(version, success) VALUES (53, 1); INSERT INTO threads(id, rollout_path) VALUES ('\(sessionID)', '/old/future.jsonl'); PRAGMA user_version = 0;")
+        let service = ProfileDiagnosticsService(baseDirectory: managerRoot)
+        let report = service.diagnose(profile: account)
+        XCTAssertTrue(report.findings.contains(where: { $0.code == "sqlite.migration-invalid" }))
+        XCTAssertTrue(report.findings.contains(where: { $0.code == "sqlite.unknown-schema" }))
+        XCTAssertThrowsError(try service.repairIndex(profile: account)) { error in
+            XCTAssertEqual(error as? ProfileManagerError, .unknownProfileSchema)
+        }
+        XCTAssertEqual(try sqliteScalar(at: sqlite, sql: "SELECT rollout_path FROM threads"), "/old/future.jsonl")
+    }
+
+    func testDiagnosticsRejectsStateDatabaseWithoutSuccessfulMigration() throws {
+        let managerRoot = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: managerRoot) }
+        let account = AccountProfile(name: "Empty migrations", profileID: UUID(), directoryName: "empty-migrations")
+        let paths = ProfilePaths(profile: account, baseDirectory: managerRoot)
+        try paths.createDirectories()
+        try paths.ensureMarker(profileID: account.profileID)
+        let sqlite = paths.codexHome.appendingPathComponent("state_5.sqlite")
+        try executeSQLite(at: sqlite, sql: "CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT); CREATE TABLE _sqlx_migrations (version BIGINT PRIMARY KEY, success BOOLEAN NOT NULL); PRAGMA user_version = 0;")
+
+        let report = ProfileDiagnosticsService(baseDirectory: managerRoot).diagnose(profile: account)
+        XCTAssertFalse(report.sqlite.first?.knownSchema ?? true)
+        XCTAssertTrue(report.findings.contains(where: { $0.code == "sqlite.unknown-schema" }))
+        XCTAssertThrowsError(try ProfileDiagnosticsService(baseDirectory: managerRoot).repairIndex(profile: account)) { error in
+            XCTAssertEqual(error as? ProfileManagerError, .unknownProfileSchema)
+        }
+    }
+
+    func testDiagnosticsDoesNotUseMalformedJSONLAsRepairCandidate() throws {
+        let managerRoot = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: managerRoot) }
+        let account = AccountProfile(name: "Malformed", profileID: UUID(), directoryName: "malformed")
+        let paths = ProfilePaths(profile: account, baseDirectory: managerRoot)
+        try paths.createDirectories()
+        try paths.ensureMarker(profileID: account.profileID)
+        let sessionID = UUID().uuidString
+        try Data(#"{"type":"message","payload":{"id":"\#(sessionID)"}}"#.utf8).write(to: paths.codexHome.appendingPathComponent("message.jsonl"))
+        let sqlite = paths.codexHome.appendingPathComponent("state_5.sqlite")
+        try createFixtureSQLite(at: sqlite, sessionID: sessionID, rolloutPath: "/old/message.jsonl")
+        let service = ProfileDiagnosticsService(baseDirectory: managerRoot)
+        let report = service.diagnose(profile: account)
+        XCTAssertTrue(report.findings.contains(where: { $0.code == "sqlite.missing-rollout" && !$0.repairable }))
+        let result = try service.repairIndex(profile: account)
+        XCTAssertEqual(result.updatedPathCount, 0)
+        XCTAssertEqual(try sqliteScalar(at: sqlite, sql: "SELECT rollout_path FROM threads"), "/old/message.jsonl")
+    }
+
+    func testDiagnosticsReportsStateIndexMissingWhenOnlyDerivedHistoryExists() throws {
+        let managerRoot = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: managerRoot) }
+        let account = AccountProfile(name: "No State", profileID: UUID(), directoryName: "no-state")
+        let paths = ProfilePaths(profile: account, baseDirectory: managerRoot)
+        try paths.createDirectories()
+        try paths.ensureMarker(profileID: account.profileID)
+        try Data(#"{"type":"session_meta","payload":{"id":"session"}}"#.utf8).write(to: paths.codexHome.appendingPathComponent("session.jsonl"))
+        try executeSQLite(at: paths.codexHome.appendingPathComponent("thread_history_1.sqlite"), sql: "CREATE TABLE history(id TEXT);")
+        let report = ProfileDiagnosticsService(baseDirectory: managerRoot).diagnose(profile: account)
+        XCTAssertTrue(report.findings.contains(where: { $0.code == "sqlite.state-index-missing" }))
+        XCTAssertFalse(report.findings.contains(where: { $0.code == "sqlite.unknown-schema" }))
+    }
+
+    func testDiagnosticsDetectsDuplicateSessionIDsAndDoesNotGuess() throws {
+        let managerRoot = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: managerRoot) }
+        let account = AccountProfile(name: "Duplicate", profileID: UUID(), directoryName: "duplicate")
+        let paths = ProfilePaths(profile: account, baseDirectory: managerRoot)
+        try paths.createDirectories()
+        try paths.ensureMarker(profileID: account.profileID)
+        let sessionID = UUID().uuidString
+        for name in ["rollout-a.jsonl", "rollout-b.jsonl"] {
+            try Data(#"{"type":"session_meta","payload":{"id":"\#(sessionID)"}}"#.utf8).write(to: paths.codexHome.appendingPathComponent(name))
+        }
+        try createFixtureSQLite(at: paths.codexHome.appendingPathComponent("state_5.sqlite"), sessionID: sessionID, rolloutPath: "/not-present")
+        let report = ProfileDiagnosticsService(baseDirectory: managerRoot).diagnose(profile: account)
+        XCTAssertTrue(report.findings.contains(where: { $0.code == "session.duplicate-id" }))
+        XCTAssertTrue(report.findings.contains(where: { $0.code == "sqlite.ambiguous-rollout" }))
+    }
+
+    func testDiagnosticsRestoresSnapshotWhenPostCheckFails() throws {
+        let managerRoot = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: managerRoot) }
+        let account = AccountProfile(name: "Rollback", profileID: UUID(), directoryName: "rollback")
+        let paths = ProfilePaths(profile: account, baseDirectory: managerRoot)
+        try paths.createDirectories()
+        try paths.ensureMarker(profileID: account.profileID)
+        let sessionID = UUID().uuidString
+        try Data(#"{"type":"session_meta","payload":{"id":"\#(sessionID)"}}"#.utf8).write(to: paths.codexHome.appendingPathComponent("rollout.jsonl"))
+        let sqlite = paths.codexHome.appendingPathComponent("state_5.sqlite")
+        try executeSQLite(at: sqlite, sql: "CREATE TABLE parent(id TEXT PRIMARY KEY); CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, parent_id TEXT REFERENCES parent(id)); CREATE TABLE _sqlx_migrations (version BIGINT PRIMARY KEY, success BOOLEAN NOT NULL); INSERT INTO _sqlx_migrations(version, success) VALUES (52, 1); INSERT INTO threads(id, rollout_path, parent_id) VALUES ('\(sessionID)', '/old/rollout.jsonl', 'missing-parent'); PRAGMA user_version = 0;")
+        let logs = managerRoot.appendingPathComponent("logs", isDirectory: true)
+        let service = ProfileDiagnosticsService(baseDirectory: managerRoot, diagnosticsLogsDirectory: logs)
+        XCTAssertThrowsError(try service.repairIndex(profile: account))
+        XCTAssertEqual(try sqliteScalar(at: sqlite, sql: "SELECT rollout_path FROM threads"), "/old/rollout.jsonl")
+        let logURL = try XCTUnwrap(service.logURLs().first)
+        XCTAssertEqual(service.readLog(at: logURL)?.result, "rollback")
+    }
+
+    func testDiagnosticsExecutionStateOnlyBlocksTerminationForRepair() {
+        XCTAssertFalse(ProfileDiagnosticsExecutionState.idle.blocksApplicationTermination)
+        XCTAssertFalse(ProfileDiagnosticsExecutionState.diagnosing.blocksApplicationTermination)
+        XCTAssertTrue(ProfileDiagnosticsExecutionState.repairing.blocksApplicationTermination)
+        XCTAssertFalse(ProfileDiagnosticsExecutionState.diagnosing.continuesAfterWindowClose)
+        XCTAssertTrue(ProfileDiagnosticsExecutionState.repairing.continuesAfterWindowClose)
+    }
+
+    func testStableProfileReferenceMigrationKeepsSharedMembership() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let sourceHome = root.appendingPathComponent("source", isDirectory: true)
+        let destinationHome = root.appendingPathComponent("destination", isDirectory: true)
+        try FileManager.default.createDirectory(at: sourceHome, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: destinationHome, withIntermediateDirectories: true)
+        try Data("instructions".utf8).write(to: sourceHome.appendingPathComponent("AGENTS.md"))
+        let store = SettingsSharingStore(baseDirectory: root.appendingPathComponent("manager", isDirectory: true))
+        let oldSource = ProfileStorageReference.isolated(directoryName: "source")
+        let oldDestination = ProfileStorageReference.isolated(directoryName: "destination")
+        let group = try store.createShareGroup(name: "Legacy", source: oldSource, destinations: [oldDestination], items: [.instructions], codexHomes: [oldSource: sourceHome, oldDestination: destinationHome])
+        let stableDestination = ProfileStorageReference.isolatedProfile(profileID: UUID())
+        XCTAssertTrue(try store.migrateProfileReference(from: oldDestination, to: stableDestination))
+        XCTAssertEqual(store.binding(for: stableDestination)?.groupID, group.id)
+        XCTAssertNil(store.binding(for: oldDestination))
+        XCTAssertTrue(store.group(id: group.id)?.members.contains(stableDestination) == true)
+    }
+
+    @MainActor
+    func testRemovedRegistrationCanRediscoverProfileByMarker() throws {
+        let managerContainer = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: managerContainer) }
+        let support = managerContainer.appendingPathComponent("support", isDirectory: true)
+        let managerRoot = support.appendingPathComponent("ChatGPT Profile Manager", isDirectory: true)
+        let defaultsName = "ChatGPTProfileManagerRediscovery-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: defaultsName))
+        defer { defaults.removePersistentDomain(forName: defaultsName) }
+        let store = ProfileStateStore(defaults: defaults)
+        let account = try store.addAccount(named: "Retained", linkToExistingEnvironment: false, directoryName: "retained")
+        let paths = ProfilePaths(profile: account, baseDirectory: managerRoot)
+        try paths.createDirectories()
+        try paths.ensureMarker(profileID: account.profileID)
+        _ = try store.removeAccount(id: account.id)
+        let launcher = CodexLauncher(stateStore: store, applicationSupportDirectory: support)
+        let candidate = try XCTUnwrap(launcher.availableIsolatedProfiles.first)
+        XCTAssertEqual(candidate.profileID, account.profileID)
+        let restored = try launcher.addAccount(named: "Restored", linkToExistingEnvironment: false, directoryName: candidate.directoryName)
+        XCTAssertEqual(restored.profileID, account.profileID)
+        XCTAssertEqual(ProfilePaths(profile: restored, baseDirectory: managerRoot).root, paths.root)
+    }
+
+    @MainActor
+    func testRelocatingProfileUpdatesOnlyRegistrationLocatorAndRejectsDuplicateMarker() throws {
+        let container = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: container) }
+        let support = container.appendingPathComponent("support", isDirectory: true)
+        let managerRoot = support.appendingPathComponent("ChatGPT Profile Manager", isDirectory: true)
+        let defaultsName = "ChatGPTProfileManagerRelocation-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: defaultsName))
+        defer { defaults.removePersistentDomain(forName: defaultsName) }
+        let store = ProfileStateStore(defaults: defaults)
+        let account = try store.addAccount(named: "Moved", linkToExistingEnvironment: false, directoryName: "moved")
+        let oldPaths = ProfilePaths(profile: account, baseDirectory: managerRoot)
+        try oldPaths.createDirectories()
+        try oldPaths.ensureMarker(profileID: account.profileID)
+        let newRoot = container.appendingPathComponent("external-profile", isDirectory: true)
+        let newPaths = ProfilePaths(root: newRoot)
+        try newPaths.createDirectories()
+        try newPaths.ensureMarker(profileID: account.profileID)
+        try FileManager.default.removeItem(at: oldPaths.root)
+        let launcher = CodexLauncher(stateStore: store, applicationSupportDirectory: support)
+        let updated = try launcher.updateProfileLocation(id: account.id, root: newRoot)
+        XCTAssertEqual(updated.lastKnownPath, newRoot.standardizedFileURL.path)
+        XCTAssertEqual(launcher.codexHomeDirectory(for: updated), newPaths.codexHome)
+
+        let secondRoot = container.appendingPathComponent("different-profile", isDirectory: true)
+        let secondPaths = ProfilePaths(root: secondRoot)
+        try secondPaths.createDirectories()
+        try secondPaths.ensureMarker(profileID: account.profileID)
+        XCTAssertThrowsError(try launcher.updateProfileLocation(id: account.id, root: secondRoot)) { error in
+            XCTAssertEqual(error as? ProfileManagerError, .profileDirectoryAlreadyAssigned)
+        }
     }
 
     func testIsolatedLaunchSpecIncludesBothIsolationPaths() {
@@ -187,6 +551,145 @@ final class ChatGPTProfileManagerTests: XCTestCase {
         XCTAssertTrue(script.contains("CHATGPT_PID=$!"))
         XCTAssertTrue(script.contains("printf '%s\\n' \"$CHATGPT_PID\""))
         XCTAssertTrue(script.contains(ProfileLauncherURL.url(for: accountID).absoluteString))
+        XCTAssertTrue(script.contains("/bin/kill -0 \"$ACTIVE_PID\""))
+        XCTAssertTrue(script.contains("/bin/rmdir \"$LOCK_DIRECTORY\""))
+        XCTAssertTrue(script.contains("OWNER_FILE=\"$LOCK_DIRECTORY/\(ProfileFileLock.ownerFileName)\""))
+        XCTAssertTrue(script.contains("/usr/bin/unlink \"$OWNER_FILE\""))
+        XCTAssertTrue(script.contains("MARKER_VERSION=$(/usr/bin/plutil -extract version raw"))
+        XCTAssertTrue(script.contains(account.profileID.uuidString))
+        XCTAssertFalse(script.contains("rm -rf \"$LOCK_DIRECTORY\""))
+    }
+
+    func testStaleEmptyLauncherLockCanBeRecoveredWithoutRecursiveRemoval() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let account = AccountProfile(name: "Stale", profileID: UUID(), directoryName: "stale")
+        let lock = ProfileLauncherStore.runningLockURL(baseDirectory: root, profileID: account.profileID)
+        try FileManager.default.createDirectory(at: lock, withIntermediateDirectories: true)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSinceNow: -20)],
+            ofItemAtPath: lock.path
+        )
+        let store = ProfileLauncherStore(baseDirectory: root)
+        store.recoverStaleRunningLock(for: account)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: lock.path))
+    }
+
+    func testRunningLockWithLiveUIOwnerIsNotRecovered() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let account = AccountProfile(name: "Active", profileID: UUID(), directoryName: "active")
+        let lock = ProfileLauncherStore.runningLockURL(baseDirectory: root, profileID: account.profileID)
+        let owner = try ProfileFileLock.acquireEmpty(at: lock)
+        try owner.setOwnerProcessIdentifier(Int32(ProcessInfo.processInfo.processIdentifier))
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSinceNow: -20)],
+            ofItemAtPath: lock.path
+        )
+
+        ProfileLauncherStore(baseDirectory: root).recoverStaleRunningLock(for: account)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: lock.path))
+        owner.release()
+    }
+
+    func testDeadUIOwnerLockIsReleasedWithoutGraceDelay() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let account = AccountProfile(name: "Finished", profileID: UUID(), directoryName: "finished")
+        let lock = ProfileLauncherStore.runningLockURL(baseDirectory: root, profileID: account.profileID)
+        _ = try ProfileFileLock.acquireOwned(at: lock, processIdentifier: 999_999)
+
+        ProfileLauncherStore(baseDirectory: root).recoverStaleRunningLock(for: account)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: lock.path))
+    }
+
+    func testMalformedLockOwnerIsPreserved() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let lock = root.appendingPathComponent("malformed.lock", isDirectory: true)
+        try FileManager.default.createDirectory(at: lock, withIntermediateDirectories: true)
+        try Data("not-a-pid".utf8).write(to: lock.appendingPathComponent(ProfileFileLock.ownerFileName))
+
+        XCTAssertEqual(ProfileFileLock.statusOwned(at: lock, isProcessActive: { _ in false }), .invalid)
+        XCTAssertFalse(ProfileFileLock.recoverStaleOwned(at: lock, isProcessActive: { _ in false }))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: lock.path))
+    }
+
+    func testOwnedMaintenanceLockDistinguishesActiveAndStaleOwners() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let runningURL = root.appendingPathComponent("running.lock", isDirectory: true)
+        let firstRunningLock = try ProfileFileLock.acquireEmpty(at: runningURL)
+        XCTAssertThrowsError(try ProfileFileLock.acquireEmpty(at: runningURL)) { error in
+            XCTAssertEqual(error as? ProfileFileLockError, .alreadyHeld)
+        }
+        firstRunningLock.release()
+
+        let lockURL = root.appendingPathComponent("maintenance.lock", isDirectory: true)
+        let lock = try ProfileFileLock.acquireOwned(at: lockURL, processIdentifier: 123)
+        XCTAssertEqual(
+            ProfileFileLock.statusOwned(at: lockURL, isProcessActive: { $0 == 123 }),
+            .active
+        )
+        XCTAssertEqual(
+            ProfileFileLock.statusOwned(at: lockURL, isProcessActive: { _ in false }),
+            .stale
+        )
+        lock.release()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: lockURL.path))
+
+        let stale = try ProfileFileLock.acquireOwned(at: lockURL, processIdentifier: 456)
+        _ = stale
+        XCTAssertTrue(ProfileFileLock.recoverStaleOwned(at: lockURL, isProcessActive: { _ in false }))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: lockURL.path))
+
+        let uiLockURL = root.appendingPathComponent("ui.lock", isDirectory: true)
+        let uiLock = try ProfileFileLock.acquireEmpty(at: uiLockURL)
+        try uiLock.setOwnerProcessIdentifier(789)
+        XCTAssertEqual(
+            ProfileFileLock.statusOwned(at: uiLockURL, isProcessActive: { $0 == 789 }),
+            .active
+        )
+        uiLock.release()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: uiLockURL.path))
+    }
+
+    func testPresentDanglingMarkerIsInvalidAndNeverTreatedAsMissing() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = ProfilePaths(root: root)
+        try paths.createDirectories()
+        let target = root.appendingPathComponent("marker-target.json")
+        try FileManager.default.createSymbolicLink(at: paths.markerURL(), withDestinationURL: target)
+
+        if case .invalid = paths.readMarkerState() {
+            // expected: a dangling marker is a present but unreadable entry
+        } else {
+            XCTFail("dangling marker must not be treated as missing")
+        }
+        XCTAssertThrowsError(try paths.ensureMarker(profileID: UUID())) { error in
+            XCTAssertEqual(error as? ProfileManagerError, .profileMarkerMismatch)
+        }
+        XCTAssertEqual(
+            try FileManager.default.destinationOfSymbolicLink(atPath: paths.markerURL().path),
+            target.path
+        )
+    }
+
+    func testDiagnosticLogURLsReturnNewestRepairLogFirst() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let logDirectory = root.appendingPathComponent("Diagnostics/Logs", isDirectory: true)
+        try FileManager.default.createDirectory(at: logDirectory, withIntermediateDirectories: true)
+        let old = logDirectory.appendingPathComponent("old.json")
+        let new = logDirectory.appendingPathComponent("new.json")
+        try Data("{}".utf8).write(to: old)
+        try Data("{}".utf8).write(to: new)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -20)], ofItemAtPath: old.path)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSinceNow: -1)], ofItemAtPath: new.path)
+
+        let service = ProfileDiagnosticsService(baseDirectory: root)
+        XCTAssertEqual(service.logURLs().map(\.lastPathComponent), ["new.json", "old.json"])
     }
 
     func testAccountUsageSnapshotParsesFiveHourAndWeeklyWindows() throws {
@@ -412,6 +915,67 @@ final class ChatGPTProfileManagerTests: XCTestCase {
         ) { error in
             XCTAssertEqual(error as? ProfileManagerError, .profileDirectoryAlreadyAssigned)
         }
+    }
+
+    @MainActor
+    func testNewAccountRegistrationRollsBackWhenStorageCreationFails() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let managerRoot = root.appendingPathComponent("ChatGPT Profile Manager", isDirectory: true)
+        try FileManager.default.createDirectory(at: managerRoot, withIntermediateDirectories: true)
+        let profiles = managerRoot.appendingPathComponent("Profiles", isDirectory: true)
+        try Data("not a directory".utf8).write(to: profiles)
+        let suiteName = "ChatGPTProfileManagerRegistrationRollback-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = ProfileStateStore(defaults: defaults)
+        let launcher = CodexLauncher(stateStore: store, applicationSupportDirectory: root)
+
+        XCTAssertThrowsError(try launcher.addAccount(named: "Broken", linkToExistingEnvironment: false))
+        XCTAssertTrue(store.accounts.isEmpty)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: profiles.path))
+    }
+
+    @MainActor
+    func testExistingProfileRegistrationRollsBackWhenMarkerCannotBeCreated() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let profileRoot = root.appendingPathComponent("external", isDirectory: true)
+        let paths = ProfilePaths(root: profileRoot)
+        try paths.createDirectories()
+        try FileManager.default.createDirectory(at: paths.markerURL(), withIntermediateDirectories: true)
+        let suiteName = "ChatGPTProfileManagerExternalRollback-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = ProfileStateStore(defaults: defaults)
+        let launcher = CodexLauncher(stateStore: store, applicationSupportDirectory: root)
+
+        XCTAssertThrowsError(try launcher.registerIsolatedProfile(named: "External", root: profileRoot))
+        XCTAssertTrue(store.accounts.isEmpty)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: paths.markerURL().path))
+    }
+
+    @MainActor
+    func testRelocationDoesNotCreateMissingLauncher() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suiteName = "ChatGPTProfileManagerRelocationLauncher-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = ProfileStateStore(defaults: defaults)
+        let oldRoot = root.appendingPathComponent("old", isDirectory: true)
+        let account = try store.addAccount(named: "Move", linkToExistingEnvironment: false, directoryName: "move", lastKnownPath: oldRoot.path)
+        try ProfilePaths(root: oldRoot).createDirectories()
+        try ProfilePaths(root: oldRoot).ensureMarker(profileID: account.profileID)
+        let newRoot = root.appendingPathComponent("new", isDirectory: true)
+        try ProfilePaths(root: newRoot).createDirectories()
+        try ProfilePaths(root: newRoot).ensureMarker(profileID: account.profileID)
+        try FileManager.default.removeItem(at: oldRoot)
+        let launcher = CodexLauncher(stateStore: store, applicationSupportDirectory: root)
+
+        _ = try launcher.updateProfileLocation(id: account.id, root: newRoot)
+        let launchers = root.appendingPathComponent("Launchers", isDirectory: true)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: launchers.path))
     }
 
     func testInvalidProfileDirectoryNamesAreRejected() throws {
@@ -737,6 +1301,46 @@ final class ChatGPTProfileManagerTests: XCTestCase {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defaults.removePersistentDomain(forName: suiteName)
         return (ProfileStateStore(defaults: defaults), defaults, suiteName)
+    }
+
+    private func createFixtureSQLite(at url: URL, sessionID: String, rolloutPath: String) throws {
+        var database: OpaquePointer?
+        XCTAssertEqual(sqlite3_open_v2(url.path, &database, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nil), SQLITE_OK)
+        guard let database else { throw ProfileManagerError.unknownProfileSchema }
+        defer { sqlite3_close(database) }
+        let sql = "CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT); CREATE TABLE _sqlx_migrations (version BIGINT PRIMARY KEY, success BOOLEAN NOT NULL); INSERT INTO _sqlx_migrations(version, success) VALUES (52, 1); INSERT INTO threads(id, rollout_path) VALUES ('\(sessionID)', '\(rolloutPath)'); PRAGMA user_version = 0;"
+        var errorMessage: UnsafeMutablePointer<CChar>?
+        let result = sqlite3_exec(database, sql, nil, nil, &errorMessage)
+        if let errorMessage { sqlite3_free(errorMessage) }
+        XCTAssertEqual(result, SQLITE_OK)
+    }
+
+    private func executeSQLite(at url: URL, sql: String) throws {
+        var database: OpaquePointer?
+        guard sqlite3_open_v2(url.path, &database, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nil) == SQLITE_OK, let database else {
+            throw ProfileManagerError.unknownProfileSchema
+        }
+        defer { sqlite3_close(database) }
+        var errorMessage: UnsafeMutablePointer<CChar>?
+        guard sqlite3_exec(database, sql, nil, nil, &errorMessage) == SQLITE_OK else {
+            if let errorMessage { sqlite3_free(errorMessage) }
+            throw ProfileManagerError.unknownProfileSchema
+        }
+    }
+
+    private func sqliteScalar(at url: URL, sql: String) throws -> String? {
+        var database: OpaquePointer?
+        guard sqlite3_open_v2(url.path, &database, SQLITE_OPEN_READONLY, nil) == SQLITE_OK, let database else {
+            throw ProfileManagerError.unknownProfileSchema
+        }
+        defer { sqlite3_close(database) }
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK, let statement else {
+            throw ProfileManagerError.unknownProfileSchema
+        }
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW, let value = sqlite3_column_text(statement, 0) else { return nil }
+        return String(cString: value)
     }
 
     private func makeTemporaryDirectory() throws -> URL {

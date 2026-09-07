@@ -1,5 +1,16 @@
 import AppKit
 
+private struct DiagnosticsTaskError: LocalizedError, Sendable {
+    let message: String
+
+    var errorDescription: String? { message }
+}
+
+private enum DiagnosticsRepairOutcome: Sendable {
+    case success(ProfileRepairResult)
+    case failure(String)
+}
+
 private final class ProfileCardView: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -63,6 +74,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     private var window: NSWindow?
     private var guideWindow: NSWindow?
     private var settingsWindow: NSWindow?
+    private var diagnosticsWindow: NSWindow?
+    private var diagnosticsAccountID: UUID?
+    private weak var diagnosticsTitleLabel: NSTextField?
+    private weak var diagnosticsSummaryLabel: NSTextField?
+    private weak var diagnosticsDetailsView: NSTextView?
+    private weak var diagnosticsRunButton: NSButton?
+    private weak var diagnosticsRelocateButton: NSButton?
+    private weak var diagnosticsRebuildButton: NSButton?
+    private weak var diagnosticsLogsButton: NSButton?
+    private weak var diagnosticsMoreButton: NSButton?
+    private weak var diagnosticsProgressIndicator: NSProgressIndicator?
+    private var diagnosticsTask: Task<Void, Never>?
+    private var diagnosticsExecutionState: ProfileDiagnosticsExecutionState = .idle {
+        didSet {
+            isDiagnosticsRunning = diagnosticsExecutionState != .idle
+            isDiagnosticsRepairRunning = diagnosticsExecutionState == .repairing
+        }
+    }
+    private var isDiagnosticsRepairRunning = false
+    private var isDiagnosticsRunning = false {
+        didSet {
+            updateDiagnosticsControls()
+        }
+    }
     private var guidePages: [NSAttributedString] = []
     private var guidePageIndex = 0
     private var guideDotButtons: [NSButton] = []
@@ -83,7 +118,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     private weak var settingsLanguagePopup: NSPopUpButton?
     private var storageChoiceButtons: [NSButton] = []
     private var usageByAccountID: [UUID: AccountUsageSnapshot] = [:]
-    private let accountRowHeight: CGFloat = 192
+    private var expandedResetCreditAccountIDs: Set<UUID> = []
+    private let collapsedAccountRowHeight: CGFloat = 120
+    private let expandedAccountRowHeight: CGFloat = 152
     private var editingAccountID: UUID?
     private weak var editingNameField: NSTextField?
     private var usageRefreshTask: Task<Void, Never>?
@@ -126,7 +163,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        // Normal termination is refused while a repair is running (see
+        // applicationShouldTerminate). A read-only diagnosis can be
+        // cancelled because it has no transaction or snapshot to complete.
+        if !diagnosticsExecutionState.continuesAfterWindowClose {
+            diagnosticsTask?.cancel()
+        }
         NSWorkspace.shared.notificationCenter.removeObserver(self)
+    }
+
+    func applicationShouldTerminate(
+        _ sender: NSApplication
+    ) -> NSApplication.TerminateReply {
+        guard diagnosticsExecutionState.blocksApplicationTermination else {
+            return .terminateNow
+        }
+
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = L10n.text(
+            "diagnostics.termination-blocked-title",
+            fallback: "プロファイルの修復中です"
+        )
+        alert.informativeText = L10n.text(
+            "diagnostics.termination-blocked-message",
+            fallback: "修復と修復ログの保存が完了してから、もう一度終了してください。"
+        )
+        alert.addButton(withTitle: L10n.text("common.ok", fallback: "OK"))
+        alert.runModal()
+        return .terminateCancel
     }
 
     @objc
@@ -173,6 +238,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         if closingWindow === settingsWindow {
             settingsWindow = nil
             settingsLanguagePopup = nil
+            return
+        }
+
+        if closingWindow === diagnosticsWindow {
+            if diagnosticsExecutionState.continuesAfterWindowClose {
+                // The detached repair owns its snapshot, transaction, and
+                // log. Keep its completion task alive and retain the busy
+                // state so applicationShouldTerminate can defer quitting.
+            } else {
+                diagnosticsTask?.cancel()
+                diagnosticsTask = nil
+                diagnosticsExecutionState = .idle
+            }
+            diagnosticsWindow = nil
+            diagnosticsAccountID = nil
+            diagnosticsTitleLabel = nil
+            diagnosticsSummaryLabel = nil
+            diagnosticsDetailsView = nil
+            diagnosticsRunButton = nil
+            diagnosticsRelocateButton = nil
+            diagnosticsRebuildButton = nil
+            diagnosticsLogsButton = nil
+            diagnosticsMoreButton = nil
+            diagnosticsProgressIndicator = nil
             return
         }
 
@@ -291,7 +380,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         let descriptionLabel = NSTextField(
             wrappingLabelWithString: L10n.text(
                 "main.subtitle",
-                fallback: "ChatGPTアカウントごとに保存先を分け、複数のプロファイルを並列で起動します。"
+                fallback: "ChatGPTプロファイルごとに保存先を分け、複数のプロファイルを並列で起動します。"
             )
         )
         descriptionLabel.font = .systemFont(ofSize: 13)
@@ -313,7 +402,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         launchStatusCard.setAccessibilityLabel(
             L10n.text(
                 "last-launched.accessibility-label",
-                fallback: "最後に起動したアカウント"
+                fallback: "最後に起動したプロファイル"
             )
         )
 
@@ -393,7 +482,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         accountHeader.translatesAutoresizingMaskIntoConstraints = false
 
         let accountHeaderLabel = NSTextField(
-            labelWithString: L10n.text("accounts.title", fallback: "アカウント")
+            labelWithString: L10n.text("accounts.title", fallback: "プロファイル")
         )
         accountHeaderLabel.font = .systemFont(ofSize: 17, weight: .semibold)
         accountHeader.addArrangedSubview(accountHeaderLabel)
@@ -409,7 +498,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         accountHeader.addArrangedSubview(headerSpacer)
 
         let addButton = NSButton(
-            title: L10n.text("accounts.add", fallback: "アカウントを追加"),
+            title: L10n.text("accounts.add", fallback: "プロファイルを追加"),
             target: self,
             action: #selector(addAccount)
         )
@@ -417,7 +506,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         addButton.controlSize = .large
         addButton.keyEquivalent = "+"
         addButton.setAccessibilityLabel(
-            L10n.text("accounts.add", fallback: "アカウントを追加")
+            L10n.text("accounts.add", fallback: "プロファイルを追加")
         )
         accountHeader.addArrangedSubview(addButton)
         mainStack.addArrangedSubview(accountHeader)
@@ -426,7 +515,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
 
         let tableView = NSTableView()
         tableView.headerView = nil
-        tableView.rowHeight = accountRowHeight
+        tableView.rowHeight = collapsedAccountRowHeight
         tableView.intercellSpacing = NSSize(width: 0, height: 0)
         tableView.selectionHighlightStyle = .none
         tableView.backgroundColor = .clear
@@ -434,7 +523,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         tableView.setAccessibilityLabel(
             L10n.text(
                 "accounts.registered.accessibility-label",
-                fallback: "登録済みアカウント"
+                fallback: "登録済みプロファイル"
             )
         )
         tableView.dataSource = self
@@ -518,7 +607,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         )
 
         let revealButton = NSButton(
-            title: L10n.text("management.open-storage", fallback: "保存先を開く"),
+            title: L10n.text("management.open-storage", fallback: "プロファイル保存先を開く"),
             target: self,
             action: #selector(revealProfiles)
         )
@@ -598,12 +687,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         } else if launcher.accounts.isEmpty {
             launchStatusDetailLabel?.stringValue = L10n.text(
                 "last-launched.empty",
-                fallback: "アカウントを追加するとここに表示されます"
+                fallback: "プロファイルを追加するとここに表示されます"
             )
         } else {
             launchStatusDetailLabel?.stringValue = L10n.text(
                 "last-launched.none",
-                fallback: "このアプリから起動したアカウントはありません"
+                fallback: "このアプリから起動したプロファイルはありません"
             )
         }
     }
@@ -647,13 +736,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             guard !Task.isCancelled else { return }
             self?.usageByAccountID = snapshots
             self?.tableView?.reloadData()
+            self?.updateTableHeight(accountCount: self?.launcher.accounts.count ?? 0)
         }
     }
 
     private func updateTableHeight(accountCount: Int) {
-        let visibleRowCount = max(accountCount, 1)
-        let desiredHeight = CGFloat(visibleRowCount) * accountRowHeight + 1
+        let desiredHeight: CGFloat
+        if launcher.accounts.isEmpty {
+            desiredHeight = collapsedAccountRowHeight + 1
+        } else {
+            desiredHeight = launcher.accounts.reduce(CGFloat(1)) { height, account in
+                height + accountRowHeight(for: account)
+            }
+        }
         tableHeightConstraint?.constant = min(max(desiredHeight, 76), 420)
+    }
+
+    private func accountRowHeight(for account: AccountProfile) -> CGFloat {
+        guard let resetCredits = usageByAccountID[account.id]?.rateLimitResetCredits,
+              resetCredits.availableCount > 0,
+              expandedResetCreditAccountIDs.contains(account.id) else {
+            return collapsedAccountRowHeight
+        }
+        return expandedAccountRowHeight
     }
 
     private func updateControlAvailability() {
@@ -665,6 +770,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
 
     func numberOfRows(in tableView: NSTableView) -> Int {
         launcher.accounts.count
+    }
+
+    func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
+        guard launcher.accounts.indices.contains(row) else {
+            return collapsedAccountRowHeight
+        }
+        return accountRowHeight(for: launcher.accounts[row])
     }
 
     func tableView(
@@ -686,8 +798,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         NSLayoutConstraint.activate([
             rowCard.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 8),
             rowCard.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -8),
-            rowCard.topAnchor.constraint(equalTo: cell.topAnchor, constant: 5),
-            rowCard.bottomAnchor.constraint(equalTo: cell.bottomAnchor, constant: -5)
+            rowCard.topAnchor.constraint(equalTo: cell.topAnchor, constant: 3),
+            rowCard.bottomAnchor.constraint(equalTo: cell.bottomAnchor, constant: -3)
         ])
 
         let rowStack = NSStackView()
@@ -700,13 +812,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         NSLayoutConstraint.activate([
             rowStack.leadingAnchor.constraint(equalTo: rowCard.leadingAnchor, constant: 10),
             rowStack.trailingAnchor.constraint(equalTo: rowCard.trailingAnchor, constant: -10),
-            rowStack.topAnchor.constraint(equalTo: rowCard.topAnchor, constant: 8),
-            rowStack.bottomAnchor.constraint(equalTo: rowCard.bottomAnchor, constant: -8)
+            rowStack.topAnchor.constraint(equalTo: rowCard.topAnchor, constant: 6),
+            rowStack.bottomAnchor.constraint(equalTo: rowCard.bottomAnchor, constant: -6)
         ])
 
         let infoStack = NSStackView()
         infoStack.orientation = .horizontal
-        infoStack.alignment = .top
+        infoStack.alignment = .centerY
         infoStack.spacing = 6
         infoStack.translatesAutoresizingMaskIntoConstraints = false
         infoStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -715,7 +827,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         let labels = NSStackView()
         labels.orientation = .vertical
         labels.alignment = .leading
-        labels.spacing = 4
+        labels.spacing = 2
         labels.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         let dragContainer = NSView()
@@ -761,6 +873,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
 
         let isExisting = account.id == launcher.existingEnvironmentAccount?.id
         let isRunning = launcher.isAccountRunning(id: account.id)
+        let isStorageMissing = !isExisting && !launcher.isProfileStorageAvailable(account)
         let usageSnapshot = usageByAccountID[account.id]
 
         if editingAccountID == account.id {
@@ -910,6 +1023,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             )
         }
 
+        if isStorageMissing {
+            metadataStack.addArrangedSubview(
+                ProfileBadgeView(
+                    text: L10n.text("diagnostics.missing-badge", fallback: "保存先不明"),
+                    color: .systemRed
+                )
+            )
+        }
+
         let planLabel = NSTextField(
             labelWithString: L10n.text(
                 "usage.plan",
@@ -944,17 +1066,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                 resetDateStyle: .monthDayAndTime
             )
         )
+
+        let usageRow = NSStackView()
+        usageRow.orientation = .horizontal
+        usageRow.alignment = .top
+        usageRow.spacing = 18
+        usageRow.setContentCompressionResistancePriority(.required, for: .vertical)
+        usageRow.addArrangedSubview(usageStack)
+
         if let resetCredits = usageSnapshot?.rateLimitResetCredits,
            resetCredits.availableCount > 0 {
-            makeResetCreditLabels(resetCredits).forEach {
-                usageStack.addArrangedSubview($0)
-            }
+            let usageSpacer = NSView()
+            usageSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            usageSpacer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            usageRow.addArrangedSubview(usageSpacer)
+            usageRow.addArrangedSubview(
+                makeResetCreditDisclosure(accountID: account.id, summary: resetCredits)
+            )
         }
-        usageStack.setContentCompressionResistancePriority(.required, for: .vertical)
-        labels.addArrangedSubview(usageStack)
+        labels.addArrangedSubview(usageRow)
 
         let directoryLabel = NSTextField(
-            labelWithString: isExisting
+            labelWithString: isStorageMissing
+                ? L10n.text("diagnostics.missing-storage", fallback: "保存先: 不明（再指定が必要）")
+                : isExisting
                 ? L10n.text(
                     "profile.storage.existing",
                     fallback: "保存先: ChatGPTの既定環境"
@@ -979,132 +1114,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         labels.addArrangedSubview(directoryLabel)
         infoStack.addArrangedSubview(labels)
 
-        let actionsStack = NSStackView()
-        actionsStack.orientation = .vertical
-        actionsStack.alignment = .trailing
-        actionsStack.spacing = 4
-        actionsStack.translatesAutoresizingMaskIntoConstraints = false
-        actionsStack.setContentHuggingPriority(.required, for: .horizontal)
-        actionsStack.setContentHuggingPriority(.required, for: .vertical)
-        actionsStack.setContentCompressionResistancePriority(.required, for: .horizontal)
-        actionsStack.setContentCompressionResistancePriority(.required, for: .vertical)
-        rowStack.addArrangedSubview(actionsStack)
+        let actionsRow = NSStackView()
+        actionsRow.orientation = .horizontal
+        actionsRow.alignment = .centerY
+        actionsRow.spacing = 6
+        actionsRow.translatesAutoresizingMaskIntoConstraints = false
+        actionsRow.heightAnchor.constraint(equalToConstant: 30).isActive = true
+        actionsRow.setContentHuggingPriority(.required, for: .horizontal)
+        actionsRow.setContentCompressionResistancePriority(.required, for: .horizontal)
+        rowStack.addArrangedSubview(actionsRow)
 
-        let primaryActionsRow = NSStackView()
-        primaryActionsRow.orientation = .horizontal
-        primaryActionsRow.alignment = .centerY
-        primaryActionsRow.spacing = 6
-        primaryActionsRow.setContentCompressionResistancePriority(.required, for: .horizontal)
-        actionsStack.addArrangedSubview(primaryActionsRow)
-
-        let managementActionsRow: NSStackView
-        if isExisting {
-            // The existing environment has no launcher or delete action, so keep
-            // its available controls together in one compact row.
-            managementActionsRow = primaryActionsRow
-        } else {
-            let secondaryActionsRow = NSStackView()
-            secondaryActionsRow.orientation = .horizontal
-            secondaryActionsRow.alignment = .centerY
-            secondaryActionsRow.distribution = .fill
-            secondaryActionsRow.spacing = 6
-            secondaryActionsRow.setContentCompressionResistancePriority(.required, for: .horizontal)
-            actionsStack.addArrangedSubview(secondaryActionsRow)
-            let secondaryActionsSpacer = NSView()
-            secondaryActionsSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-            secondaryActionsSpacer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-            secondaryActionsRow.addArrangedSubview(secondaryActionsSpacer)
-            // Add the row to the stack before activating this constraint so both
-            // rows already share a common ancestor in AppKit's layout tree.
-            secondaryActionsRow.widthAnchor.constraint(equalTo: primaryActionsRow.widthAnchor).isActive = true
-            managementActionsRow = secondaryActionsRow
-        }
-
-        let settingsButton = NSButton(
-            title: L10n.text("settings-sharing.manage", fallback: "設定"),
-            target: self,
-            action: #selector(manageAccountSettings(_:))
+        let menuButton = makeAccountIconButton(
+            systemName: "ellipsis",
+            accessibilityLabel: L10n.text(
+                "profile.menu.accessibility-label",
+                fallback: "プロファイルの操作メニュー"
+            ),
+            toolTip: L10n.text(
+                "profile.menu.tooltip",
+                fallback: "プロファイルの操作を表示"
+            ),
+            action: #selector(showProfileMenu(_:))
         )
-        settingsButton.bezelStyle = .inline
-        settingsButton.controlSize = .regular
-        settingsButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
-        settingsButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 28).isActive = true
-        settingsButton.identifier = NSUserInterfaceItemIdentifier(account.id.uuidString)
-        settingsButton.setAccessibilityLabel(
-            L10n.text(
-                "settings-sharing.manage.accessibility-label",
-                fallback: "{name}の設定を管理",
-                replacing: ["name": account.name]
-            )
-        )
-        managementActionsRow.addArrangedSubview(settingsButton)
-
-        if !isExisting {
-            let hasLauncher = launcher.hasProfileLauncher(for: account)
-            let launcherButton = NSButton(
-                title: L10n.text(
-                    hasLauncher ? "launcher.update" : "launcher.generate",
-                    fallback: hasLauncher ? "起動アプリを更新" : "起動アプリを作成"
-                ),
-                target: self,
-                action: #selector(generateProfileLauncher(_:))
-            )
-            launcherButton.bezelStyle = .inline
-            launcherButton.controlSize = .regular
-            launcherButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 132).isActive = true
-            launcherButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 28).isActive = true
-            launcherButton.identifier = NSUserInterfaceItemIdentifier(account.id.uuidString)
-            launcherButton.image = NSImage(
-                systemSymbolName: "dock.rectangle",
-                accessibilityDescription: nil
-            )
-            launcherButton.imagePosition = .imageLeading
-            launcherButton.setAccessibilityLabel(
-                L10n.text(
-                    hasLauncher
-                        ? "launcher.update.accessibility-label"
-                        : "launcher.generate.accessibility-label",
-                    fallback: hasLauncher
-                        ? "{name}の起動アプリを更新"
-                        : "{name}の起動アプリを作成",
-                    replacing: ["name": account.name]
-                )
-            )
-            launcherButton.toolTip = L10n.text(
-                "launcher.tooltip",
-                fallback: "プロファイル専用の起動アプリを作成"
-            )
-            primaryActionsRow.addArrangedSubview(launcherButton)
-        }
+        menuButton.identifier = NSUserInterfaceItemIdentifier(account.id.uuidString)
+        actionsRow.addArrangedSubview(menuButton)
 
         let openButton = NSButton(
             title: isRunning
-                ? L10n.text("account.quit", fallback: "終了")
+                ? L10n.text("account.focus", fallback: "開く")
                 : L10n.text("account.open", fallback: "起動"),
             target: self,
-            action: isRunning
-                ? #selector(quitAccount(_:))
-                : #selector(openAccount(_:))
+            action: #selector(openAccount(_:))
         )
         openButton.bezelStyle = .rounded
         openButton.controlSize = .large
         openButton.isBordered = false
         openButton.wantsLayer = true
-        openButton.layer?.backgroundColor = isRunning
-            ? NSColor.systemRed.withAlphaComponent(0.88).cgColor
-            : NSColor.controlAccentColor.cgColor
+        openButton.layer?.backgroundColor = NSColor.controlAccentColor.cgColor
         openButton.layer?.cornerRadius = 7
         openButton.contentTintColor = .white
         openButton.font = .systemFont(ofSize: 13, weight: .semibold)
-        openButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 46).isActive = true
+        openButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 50).isActive = true
         openButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 28).isActive = true
         openButton.identifier = NSUserInterfaceItemIdentifier(account.id.uuidString)
         openButton.isEnabled = !isLaunching
+            && (isExisting || !isStorageMissing)
         openButton.setAccessibilityLabel(
             isRunning
                 ? L10n.text(
-                    "account.quit.accessibility-label",
-                    fallback: "{name}のChatGPTを終了",
+                    "account.focus.accessibility-label",
+                    fallback: "{name}のChatGPTを開く",
                     replacing: ["name": account.name]
                 )
                 : L10n.text(
@@ -1115,11 +1174,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         )
         openButton.toolTip = isRunning
             ? L10n.text(
-                "account.quit.tooltip",
-                fallback: "このプロファイルのChatGPTを終了"
+                "account.focus.tooltip",
+                fallback: "このプロファイルのChatGPTを前面に表示"
             )
-            : nil
-        primaryActionsRow.addArrangedSubview(openButton)
+            : (isStorageMissing
+                ? L10n.text("diagnostics.missing-tooltip", fallback: "保存先を再指定してから起動してください")
+                : nil)
+        actionsRow.addArrangedSubview(openButton)
 
         return cell
     }
@@ -1147,6 +1208,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         button.heightAnchor.constraint(equalToConstant: 26).isActive = true
         button.setAccessibilityLabel(accessibilityLabel)
         button.toolTip = toolTip
+        return button
+    }
+
+    private func makeAccountSecondaryActionButton(
+        title: String,
+        action: Selector,
+        systemName: String? = nil,
+        tintColor: NSColor = .labelColor
+    ) -> NSButton {
+        let button = NSButton(title: title, target: self, action: action)
+        button.bezelStyle = .rounded
+        button.controlSize = .large
+        button.isBordered = false
+        button.wantsLayer = true
+        button.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.12).cgColor
+        button.layer?.cornerRadius = 7
+        button.contentTintColor = tintColor
+        button.font = .systemFont(ofSize: 12, weight: .semibold)
+        button.cell?.font = .systemFont(ofSize: 12, weight: .semibold)
+        button.heightAnchor.constraint(equalToConstant: 28).isActive = true
+        if let systemName {
+            button.image = NSImage(
+                systemSymbolName: systemName,
+                accessibilityDescription: nil
+            )
+            button.imagePosition = .imageLeading
+        }
         return button
     }
 
@@ -1282,6 +1370,64 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         return labels
     }
 
+    private func makeResetCreditDisclosure(
+        accountID: UUID,
+        summary: RateLimitResetCreditsSummary
+    ) -> NSView {
+        let labels = makeResetCreditLabels(summary)
+        guard let titleLabel = labels.first else {
+            return NSView()
+        }
+
+        let isExpanded = expandedResetCreditAccountIDs.contains(accountID)
+        let disclosureButton = NSButton(
+            title: titleLabel.stringValue,
+            target: self,
+            action: #selector(toggleResetCredits(_:))
+        )
+        disclosureButton.bezelStyle = .inline
+        disclosureButton.controlSize = .small
+        disclosureButton.isBordered = false
+        disclosureButton.imagePosition = .imageLeading
+        disclosureButton.image = NSImage(
+            systemSymbolName: isExpanded ? "chevron.down" : "chevron.right",
+            accessibilityDescription: nil
+        )
+        disclosureButton.contentTintColor = .systemOrange
+        disclosureButton.font = titleLabel.font
+        disclosureButton.alignment = .left
+        disclosureButton.identifier = NSUserInterfaceItemIdentifier(accountID.uuidString)
+        let disclosureAccessibilityLabel = L10n.text(
+            isExpanded
+                ? "usage.reset-credits.collapse"
+                : "usage.reset-credits.expand",
+            fallback: isExpanded
+                ? "上限リセットの期限一覧を折りたたむ"
+                : "上限リセットの期限一覧を表示"
+        )
+        disclosureButton.setAccessibilityLabel(disclosureAccessibilityLabel)
+        disclosureButton.toolTip = disclosureAccessibilityLabel
+        disclosureButton.setContentHuggingPriority(.required, for: .horizontal)
+        disclosureButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        let detailsStack = NSStackView()
+        detailsStack.orientation = .vertical
+        detailsStack.alignment = .leading
+        detailsStack.spacing = 1
+        detailsStack.isHidden = !isExpanded
+        labels.dropFirst().forEach { detailsStack.addArrangedSubview($0) }
+
+        let disclosureStack = NSStackView()
+        disclosureStack.orientation = .vertical
+        disclosureStack.alignment = .leading
+        disclosureStack.spacing = 1
+        disclosureStack.setContentHuggingPriority(.required, for: .horizontal)
+        disclosureStack.setContentCompressionResistancePriority(.required, for: .horizontal)
+        disclosureStack.addArrangedSubview(disclosureButton)
+        disclosureStack.addArrangedSubview(detailsStack)
+        return disclosureStack
+    }
+
     private func usageColor(for window: UsageWindow?) -> NSColor {
         guard let window else {
             return .tertiaryLabelColor
@@ -1388,92 +1534,208 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         presentAddAccount()
     }
 
+    private func accountID(from sender: NSButton) -> UUID? {
+        guard let rawID = sender.identifier?.rawValue else { return nil }
+        return UUID(uuidString: rawID)
+    }
+
+    private func accountID(from item: NSMenuItem) -> UUID? {
+        guard let rawID = item.representedObject as? String else { return nil }
+        return UUID(uuidString: rawID)
+    }
+
     @objc
-    private func manageAccountSettings(_ sender: NSButton) {
-        guard
-            let rawID = sender.identifier?.rawValue,
-            let accountID = UUID(uuidString: rawID),
-            let account = launcher.accounts.first(where: { $0.id == accountID })
-        else {
-            presentError(ProfileManagerError.accountNotFound)
+    private func toggleResetCredits(_ sender: NSButton) {
+        guard let accountID = accountID(from: sender) else { return }
+        if expandedResetCreditAccountIDs.contains(accountID) {
+            expandedResetCreditAccountIDs.remove(accountID)
+        } else {
+            expandedResetCreditAccountIDs.insert(accountID)
+        }
+        tableView?.reloadData()
+        updateTableHeight(accountCount: launcher.accounts.count)
+    }
+
+    @objc
+    private func showProfileMenu(_ sender: NSButton) {
+        guard let accountID = accountID(from: sender),
+              let account = launcher.accounts.first(where: { $0.id == accountID }) else {
             return
         }
 
-        let alert = NSAlert()
-        alert.alertStyle = .informational
-        alert.messageText = L10n.text(
-            "settings-sharing.manage-title",
-            fallback: "「{name}」の設定を管理",
-            replacing: ["name": account.name]
-        )
-        alert.informativeText = L10n.text(
-            "settings-sharing.manage-message",
-            fallback: "ChatGPTのアカウント、チャット、プロジェクト、ログイン状態は対象外です。ここで扱うのはCodexのローカル設定だけです。"
-        )
-        let isShared = launcher.settingsBinding(for: account) != nil
-        if isShared {
-            alert.addButton(
-                withTitle: L10n.text(
-                    "settings-sharing.leave",
-                    fallback: "共有を解除して現在の設定を保持"
-                )
-            )
-        } else {
-            alert.addButton(
-                withTitle: L10n.text(
-                    "settings-sharing.share",
-                    fallback: "設定を共有"
-                )
-            )
-        }
-        alert.addButton(
-            withTitle: L10n.text(
-                "settings-sharing.copy",
-                fallback: "設定をコピー"
-            )
-        )
-        let canDelete = account.id != launcher.existingEnvironmentAccount?.id
-        let isDeleteEnabled = canDelete
-            && !launcher.isAccountRunning(id: account.id)
-            && !isLaunching
-        if canDelete {
-            let deleteButton = alert.addButton(
-                withTitle: L10n.text(
-                    "account.delete.settings",
-                    fallback: "プロファイルを削除"
-                )
-            )
-            deleteButton.image = NSImage(
-                systemSymbolName: "trash",
-                accessibilityDescription: nil
-            )
-            deleteButton.imagePosition = .imageLeading
-            deleteButton.hasDestructiveAction = true
-            deleteButton.contentTintColor = .systemRed
-            deleteButton.isEnabled = isDeleteEnabled
-            deleteButton.toolTip = isDeleteEnabled
-                ? nil
-                : L10n.text(
-                    "account.delete.settings-disabled",
-                    fallback: "ChatGPTを終了してから削除できます"
-                )
-        }
-        alert.addButton(withTitle: L10n.text("common.cancel", fallback: "キャンセル"))
+        let isExisting = account.id == launcher.existingEnvironmentAccount?.id
+        let isRunning = launcher.isAccountRunning(id: account.id)
+        let menu = NSMenu()
+        menu.autoenablesItems = false
 
-        switch alert.runModal() {
-        case .alertFirstButtonReturn:
-            if isShared {
-                leaveSettingsShare(accountID: accountID)
-            } else {
-                presentCreateSettingsShare(sourceAccountID: accountID)
-            }
-        case .alertSecondButtonReturn:
-            presentCopySettings(destinationAccountID: accountID)
-        case .alertThirdButtonReturn where isDeleteEnabled:
-            deleteAccountRegistration(accountID: accountID)
-        default:
-            break
+        func addItem(
+            _ title: String,
+            action: Selector,
+            enabled: Bool = true
+        ) {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            item.target = self
+            item.representedObject = account.id.uuidString
+            item.isEnabled = enabled
+            menu.addItem(item)
         }
+
+        if isRunning {
+            addItem(
+                L10n.text("profile.menu.quit", fallback: "ChatGPTを終了"),
+                action: #selector(quitAccountFromMenu(_:)),
+                enabled: !isLaunching
+            )
+        }
+
+        if let storageURL = profileStorageURL(for: account) {
+            if !menu.items.isEmpty {
+                menu.addItem(.separator())
+            }
+            addItem(
+                L10n.text("profile.menu.reveal-storage", fallback: "Finderで保存先を開く"),
+                action: #selector(revealProfileStorageFromMenu(_:)),
+                enabled: FileManager.default.fileExists(atPath: storageURL.path)
+            )
+        }
+
+        if !isExisting {
+            addItem(
+                L10n.text(
+                    launcher.hasProfileLauncher(for: account)
+                        ? "launcher.update"
+                        : "launcher.generate",
+                    fallback: launcher.hasProfileLauncher(for: account)
+                        ? "Dock用起動アプリを再作成…"
+                        : "Dock用起動アプリを作成…"
+                ),
+                action: #selector(generateProfileLauncherFromMenu(_:)),
+                enabled: !isLaunching
+            )
+        }
+
+        if !menu.items.isEmpty {
+            menu.addItem(.separator())
+        }
+        let isShared = launcher.settingsBinding(for: account) != nil
+        addItem(
+            isShared
+                ? L10n.text("settings-sharing.manage", fallback: "共有設定を管理…")
+                : L10n.text("settings-sharing.share", fallback: "設定の共有…"),
+            action: #selector(manageSettingsShareFromMenu(_:)),
+            enabled: !isLaunching
+        )
+        addItem(
+            L10n.text(
+                "settings-sharing.copy-from-profile",
+                fallback: "別のプロファイルから設定をコピー…"
+            ),
+            action: #selector(copySettingsFromMenu(_:)),
+            enabled: launcher.accounts.count > 1 && !isLaunching
+        )
+
+        if !isExisting {
+            menu.addItem(.separator())
+            addItem(
+                L10n.text("diagnostics.menu", fallback: "プロファイルを診断…"),
+                action: #selector(diagnoseProfileFromMenu(_:)),
+                enabled: !isDiagnosticsRunning
+            )
+        }
+
+        if !isExisting {
+            menu.addItem(.separator())
+            addItem(
+                L10n.text("profile.menu.delete", fallback: "プロファイルを削除…"),
+                action: #selector(deleteAccountFromMenu(_:)),
+                enabled: !isRunning && !isLaunching
+            )
+        }
+
+        menu.popUp(
+            positioning: nil,
+            at: NSPoint(x: sender.bounds.minX, y: sender.bounds.maxY + 4),
+            in: sender
+        )
+    }
+
+    @objc
+    private func generateProfileLauncherFromMenu(_ sender: NSMenuItem) {
+        guard let accountID = accountID(from: sender) else {
+            presentError(ProfileManagerError.accountNotFound)
+            return
+        }
+        generateProfileLauncher(accountID: accountID)
+    }
+
+    @objc
+    private func deleteAccountFromMenu(_ sender: NSMenuItem) {
+        guard let accountID = accountID(from: sender) else {
+            presentError(ProfileManagerError.accountNotFound)
+            return
+        }
+        deleteAccountRegistration(accountID: accountID)
+    }
+
+    @objc
+    private func revealProfileStorageFromMenu(_ sender: NSMenuItem) {
+        guard let accountID = accountID(from: sender),
+              let account = launcher.accounts.first(where: { $0.id == accountID }),
+              let storageURL = profileStorageURL(for: account) else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([storageURL])
+    }
+
+    @objc
+    private func manageSettingsShareFromMenu(_ sender: NSMenuItem) {
+        guard let accountID = accountID(from: sender),
+              let account = launcher.accounts.first(where: { $0.id == accountID }) else { return }
+        if launcher.settingsBinding(for: account) == nil {
+            presentCreateSettingsShare(sourceAccountID: accountID)
+        } else {
+            presentManageSettingsShare(accountID: accountID)
+        }
+    }
+
+    @objc
+    private func copySettingsFromMenu(_ sender: NSMenuItem) {
+        guard let accountID = accountID(from: sender) else {
+            presentError(ProfileManagerError.accountNotFound)
+            return
+        }
+        presentCopySettings(destinationAccountID: accountID)
+    }
+
+    @objc
+    private func diagnoseProfileFromMenu(_ sender: NSMenuItem) {
+        guard let accountID = accountID(from: sender) else {
+            presentError(ProfileManagerError.accountNotFound)
+            return
+        }
+        showDiagnostics(accountID: accountID)
+    }
+
+    private func profileStorageURL(for account: AccountProfile) -> URL? {
+        if account.id == launcher.existingEnvironmentAccount?.id {
+            return launcher.codexHomeDirectory(for: account)
+        }
+        guard let baseDirectory = try? launcher.profileBaseDirectory() else { return nil }
+        return ProfilePaths(profile: account, baseDirectory: baseDirectory).root
+    }
+
+    private func openOrFocusAccount(_ account: AccountProfile) {
+        guard !isLaunching else { return }
+        if launcher.isAccountRunning(id: account.id) {
+            if !launcher.activate(accountID: account.id) {
+                showTransientStatus(
+                    L10n.text(
+                        "account.focus.unavailable",
+                        fallback: "起動中のChatGPTを前面に表示できませんでした。"
+                    )
+                )
+            }
+            return
+        }
+        launchAccount(account.id)
     }
 
     private func presentCreateSettingsShare(sourceAccountID: UUID) {
@@ -1530,7 +1792,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         )
         accessory.addArrangedSubview(groupNameField)
         accessory.addArrangedSubview(
-            NSTextField(labelWithString: L10n.text("settings-sharing.members", fallback: "共有するプロファイル"))
+            NSTextField(labelWithString: L10n.text("settings-sharing.source-profile", fallback: "作成元プロファイル"))
+        )
+        let sourceLabel = NSTextField(labelWithString: sourceAccount.name)
+        sourceLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        accessory.addArrangedSubview(sourceLabel)
+        accessory.addArrangedSubview(
+            NSTextField(labelWithString: L10n.text("settings-sharing.members", fallback: "追加で参加するプロファイル"))
         )
         accessory.addArrangedSubview(destinationStack)
         accessory.addArrangedSubview(
@@ -1553,7 +1821,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             withTitle: L10n.text("settings-sharing.create", fallback: "共有を作成")
         )
         alert.addButton(
-            withTitle: L10n.text("settings-sharing.join-existing", fallback: "既存の共有へ参加")
+            withTitle: L10n.text("settings-sharing.join-existing", fallback: "既存の共有へ参加…")
         )
         alert.addButton(withTitle: L10n.text("common.cancel", fallback: "キャンセル"))
         alert.accessoryView = accessory
@@ -1784,6 +2052,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         }
     }
 
+    private func presentManageSettingsShare(accountID: UUID) {
+        guard let account = launcher.accounts.first(where: { $0.id == accountID }),
+              let binding = launcher.settingsBinding(for: account),
+              let group = launcher.settingsGroups().first(where: { $0.id == binding.groupID }) else {
+            presentError(ProfileManagerError.accountNotFound)
+            return
+        }
+
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = L10n.text(
+            "settings-sharing.manage-title",
+            fallback: "共有設定を管理"
+        )
+        alert.informativeText = L10n.text(
+            "settings-sharing.manage-message",
+            fallback: "「{name}」の共有設定に参加中です。共有を解除すると、現在の設定を保持したまま独立したファイルに戻します。",
+            replacing: ["name": group.name]
+        )
+        alert.addButton(withTitle: L10n.text("settings-sharing.leave-short", fallback: "共有を解除"))
+        alert.addButton(withTitle: L10n.text("common.cancel", fallback: "キャンセル"))
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        leaveSettingsShare(accountID: accountID)
+    }
+
     private func makeManagedSettingCheckboxes(
         defaults: Set<ManagedSetting>
     ) -> (view: NSStackView, buttons: [ManagedSetting: NSButton]) {
@@ -1937,7 +2230,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         }
 
         let settingsWindow = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 560, height: 300),
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: 320),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -2006,7 +2299,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         let subtitleLabel = NSTextField(
             wrappingLabelWithString: L10n.text(
                 "settings.header-subtitle",
-                fallback: "アプリの表示言語を設定します。"
+                fallback: "アプリ全体の設定を管理します。"
             )
         )
         subtitleLabel.font = .systemFont(ofSize: 12)
@@ -2096,7 +2389,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         let dataNote = NSTextField(
             wrappingLabelWithString: L10n.text(
                 "settings.language.data-note",
-                fallback: "表示言語を変更しても、アカウント名、保存先、プロジェクト、チャットは変更されません。"
+                fallback: "表示言語を変更しても、プロファイル名、保存先、プロジェクト、チャットは変更されません。"
             )
         )
         dataNote.font = .systemFont(ofSize: 11)
@@ -2307,7 +2600,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                     content,
                     L10n.text(
                         "guide.introduction.summary",
-                        fallback: "ChatGPT Profile Managerは、ChatGPTアカウントごとに使う保存先を分け、異なるプロファイルを同時に起動するためのアプリです。アカウントやクラウド上のプロジェクトを移動・コピーするものではありません。\n\n"
+                        fallback: "ChatGPT Profile Managerは、ChatGPTプロファイルごとに使う保存先を分け、異なるプロファイルを同時に起動するためのアプリです。プロファイルやクラウド上のプロジェクトを移動・コピーするものではありません。\n\n"
                     ),
                     font: bodyFont,
                     color: .secondaryLabelColor,
@@ -2326,7 +2619,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                     content,
                     L10n.text(
                         "guide.introduction.flow-body",
-                        fallback: "1　初回アカウントを確認\n2　保存先を選択\n3　必要ならログイン\n4　一覧の「起動」からプロファイルごとに起動\n\n"
+                        fallback: "1　初回プロファイルを確認\n2　保存先を選択\n3　必要ならログイン\n4　一覧の「起動」からプロファイルごとに起動\n\n"
                     ),
                     font: bodyFont,
                     paragraphStyle: bodyParagraphStyle
@@ -2344,14 +2637,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                     content,
                     L10n.text(
                         "guide.introduction.prerequisite-body",
-                        fallback: "既存環境がある場合、最初の起動時にメールアドレスを表示名として自動登録します。既存環境がない場合や2件目以降は、アカウント追加から保存先を選びます。アカウント間でプロジェクトやチャットをコピーすることはありません。"
+                        fallback: "既存環境がある場合、最初の起動時にメールアドレスを表示名として自動登録します。既存環境がない場合や2件目以降は、プロファイル追加から保存先を選びます。プロファイル間でプロジェクトやチャットをコピーすることはありません。"
                     ),
                     font: bodyFont,
                     paragraphStyle: bodyParagraphStyle
                 )
             },
             makeGuidePage(
-                title: L10n.text("guide.register.title", fallback: "アカウントを登録")
+                title: L10n.text("guide.register.title", fallback: "プロファイルを登録")
             ) { content in
                 appendGuideText(
                     content,
@@ -2366,7 +2659,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                     content,
                     L10n.text(
                         "guide.register.launch-body",
-                        fallback: "ChatGPT Profile Managerを起動します。既存環境がある場合は、最初のアカウントをメールアドレスの表示名で自動登録します。登録しただけではChatGPTは起動せず、一覧の「起動」を押したときだけ選択した環境を起動します。\n\n"
+                        fallback: "ChatGPT Profile Managerを起動します。既存環境がある場合は、最初のプロファイルをメールアドレスの表示名で自動登録します。登録しただけではChatGPTは起動せず、一覧の「起動」を押したときだけ選択した環境を起動します。\n\n"
                     ),
                     font: bodyFont,
                     paragraphStyle: bodyParagraphStyle
@@ -2375,7 +2668,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                     content,
                     L10n.text(
                         "guide.register.add-heading",
-                        fallback: "アカウントを追加する\n"
+                        fallback: "プロファイルを追加する\n"
                     ),
                     font: sectionFont,
                     paragraphStyle: sectionParagraphStyle
@@ -2384,7 +2677,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                     content,
                     L10n.text(
                         "guide.register.add-body",
-                        fallback: "既存環境が自動登録されなかった場合や、別のアカウントを追加する場合は、「アカウントを追加」を押して一覧で表示する名前を入力します。メールアドレス以外の名前にも変更できます。アカウントは任意の数を追加できます。名前は1文字以上60文字以内で、同じ名前は登録できません。"
+                        fallback: "既存環境が自動登録されなかった場合や、別のプロファイルを追加する場合は、「プロファイルを追加」を押して一覧で表示する名前を入力します。メールアドレス以外の名前にも変更できます。プロファイルは任意の数を追加できます。名前は1文字以上60文字以内で、同じ名前は登録できません。"
                     ),
                     font: bodyFont,
                     paragraphStyle: bodyParagraphStyle
@@ -2397,7 +2690,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                     content,
                     L10n.text(
                         "guide.storage.introduction",
-                        fallback: "名前の入力後、「このアカウントで使う保存先を選択」と表示されます。次の3つから、アカウントで使う環境を選びます。\n\n"
+                        fallback: "名前の入力後、「このプロファイルで使う保存先を選択」と表示されます。次の3つから、プロファイルで使う環境を選びます。\n\n"
                     ),
                     font: bodyFont,
                     paragraphStyle: bodyParagraphStyle
@@ -2415,7 +2708,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                     content,
                     L10n.text(
                         "guide.storage.existing-body",
-                        fallback: "普段のChatGPTのプロジェクト、チャット、設定、ログイン状態をそのまま使います。割り当てられるのは1アカウントだけです。\n\n"
+                        fallback: "普段のChatGPTのプロジェクト、チャット、設定、ログイン状態をそのまま使います。割り当てられるのは1プロファイルだけです。\n\n"
                     ),
                     font: bodyFont,
                     paragraphStyle: bodyParagraphStyle
@@ -2433,7 +2726,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                     content,
                     L10n.text(
                         "guide.storage.new-body",
-                        fallback: "このアカウント専用の保存先を新しく作ります。既存環境のデータはコピーされません。\n\n"
+                        fallback: "このプロファイル専用の保存先を新しく作ります。既存環境のデータはコピーされません。\n\n"
                     ),
                     font: bodyFont,
                     paragraphStyle: bodyParagraphStyle
@@ -2491,20 +2784,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                     content,
                     L10n.text(
                         "guide.switch.open-body",
-                        fallback: "一覧からアカウントを選び、「起動」を押します。他のプロファイルを終了せず、別のChatGPTインスタンスとして起動します。データを保護するため、同じ保存先は複数起動できません。起動中の行では「起動」が「終了」に変わります。確認後、そのプロファイルのChatGPTだけを終了します。"
+                        fallback: "一覧からプロファイルを選び、「起動」を押します。他のプロファイルを終了せず、別のChatGPTインスタンスとして起動します。データを保護するため、同じ保存先は複数起動できません。起動中の行では「起動」が「開く」に変わり、既存ウィンドウを前面に表示します。終了はプロファイルの「…」メニューから行います。"
                     ),
                     font: bodyFont,
                     paragraphStyle: bodyParagraphStyle
                 )
             },
             makeGuidePage(
-                title: L10n.text("guide.organize.title", fallback: "アカウントを整理する")
+                title: L10n.text("guide.organize.title", fallback: "プロファイルを整理する")
             ) { content in
                 appendGuideText(
                     content,
                     L10n.text(
                         "guide.organize.add-heading",
-                        fallback: "別のアカウントを追加する\n"
+                        fallback: "別のプロファイルを追加する\n"
                     ),
                     font: sectionFont,
                     paragraphStyle: sectionParagraphStyle
@@ -2549,7 +2842,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                     content,
                     L10n.text(
                         "guide.organize.remove-body",
-                        fallback: "分離プロファイルの「削除」は登録情報だけを外し、保存フォルダやデータは残します。既存環境に割り当てたアカウントは削除できません。"
+                        fallback: "分離プロファイルの「プロファイルを削除…」は登録情報だけを外し、保存フォルダやデータは残します。既存環境に割り当てたプロファイルは削除できません。"
                     ),
                     font: bodyFont,
                     paragraphStyle: bodyParagraphStyle
@@ -2571,7 +2864,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                     content,
                     L10n.text(
                         "guide.settings.share-body",
-                        fallback: "アカウント行の「設定」から「設定を共有」を選ぶと、複数のプロファイルを1つの共有グループへ追加できます。AGENTS.mdや選択した設定は共通ファイルを参照し、どのプロファイルから変更しても共有されます。反映はChatGPTの次回起動からです。\n\n"
+                        fallback: "プロファイルの「…」メニューから「設定の共有…」を選ぶと、複数のプロファイルを1つの共有グループへ追加できます。作成元プロファイルは自動的に参加し、AGENTS.mdや選択した設定は共通ファイルを参照します。反映はChatGPTの次回起動からです。\n\n"
                     ),
                     font: bodyFont,
                     paragraphStyle: bodyParagraphStyle
@@ -2589,7 +2882,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                     content,
                     L10n.text(
                         "guide.settings.copy-body",
-                        fallback: "「設定をコピー」は1回だけの複製です。コピー元を後から変更しても、コピー先は変わりません。同名の設定はバックアップしてから置き換えます。\n\n"
+                        fallback: "コピー先プロファイルの「…」メニューから「別のプロファイルから設定をコピー…」を選びます。これは1回だけの複製で、コピー元を後から変更してもコピー先は変わりません。同名の設定はバックアップしてから置き換えます。\n\n"
                     ),
                     font: bodyFont,
                     paragraphStyle: bodyParagraphStyle
@@ -2620,7 +2913,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                     content,
                     L10n.text(
                         "guide.launcher.generate-heading",
-                        fallback: "起動アプリを作成する\n"
+                        fallback: "プロファイル起動用アプリを作成する\n"
                     ),
                     font: sectionFont,
                     paragraphStyle: sectionParagraphStyle
@@ -2629,7 +2922,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                     content,
                     L10n.text(
                         "guide.launcher.generate-body",
-                        fallback: "分離プロファイルの行にある「起動アプリを作成」を押すと、そのプロファイル専用の起動アプリを作成します。作成後にFinderで表示し、Dockへドラッグして追加してください。すでに作成済みの場合は「起動アプリを更新」と表示されます。ChatGPTの既存環境にはChatGPTアプリ自身のDock機能があるため、このボタンは表示されません。\n\n"
+                        fallback: "分離プロファイルの「…」メニューから「Dock用起動アプリを作成…」を選ぶと、そのプロファイル専用の起動用アプリを作成します。作成後にFinderで表示し、Dockへドラッグして追加してください。ChatGPTの既存環境にはChatGPTアプリ自身のDock機能があるため、この項目は表示されません。\n\n"
                     ),
                     font: bodyFont,
                     paragraphStyle: bodyParagraphStyle
@@ -2647,7 +2940,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                     content,
                     L10n.text(
                         "guide.launcher.icon-body",
-                        fallback: "起動アプリごとにプロファイル名、色・頭文字付きのアイコンを生成します。キャメルケース、空白、ハイフン、アンダースコアを単語の区切りとして認識するため、ShareFair、share-fair、share_fairはいずれもSFになります。単語が1つだけの場合は先頭2文字を使います。アカウント名を変更した後は「起動アプリを更新」を押すと名前、表示名、アイコンを更新できます。\n\n"
+                        fallback: "プロファイル起動用アプリごとにプロファイル名、色・頭文字付きのアイコンを生成します。キャメルケース、空白、ハイフン、アンダースコアを単語の区切りとして認識するため、ShareFair、share-fair、share_fairはいずれもSFになります。単語が1つだけの場合は先頭2文字を使います。名前を変更した後は、分離プロファイルの「…」メニューから「Dock用起動アプリを再作成…」を選ぶと、名前、表示名、アイコンを更新できます。\n\n"
                     ),
                     font: bodyFont,
                     paragraphStyle: bodyParagraphStyle
@@ -2665,7 +2958,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                     content,
                     L10n.text(
                         "guide.launcher.behavior-body",
-                        fallback: "起動アプリは分離プロファイルの保存先を指定してChatGPTを直接起動します。ChatGPTが標準の場所にない場合は、互換用にChatGPT Profile Managerへ処理を引き継ぎます。別プロファイルは並列起動できますが、同じ保存先は二重起動できません。ChatGPTの既存環境は起動アプリの対象外です。起動アプリはプロファイル名を使った名前で保存されます。\n\n"
+                        fallback: "プロファイル起動用アプリは分離プロファイルの保存先を指定してChatGPTを直接起動します。ChatGPTが標準の場所にない場合は、互換用にChatGPT Profile Managerへ処理を引き継ぎます。別プロファイルは並列起動できますが、同じ保存先は二重起動できません。ChatGPTの既存環境はプロファイル起動用アプリの対象外です。プロファイル起動用アプリはプロファイル名を使った名前で保存されます。\n\n"
                     ),
                     font: bodyFont,
                     paragraphStyle: bodyParagraphStyle
@@ -2694,7 +2987,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                     content,
                     L10n.text(
                         "guide.mechanism.storage-body",
-                        fallback: "ChatGPTの既存環境は、ChatGPTが普段使っている保存先です。分離プロファイルは、ChatGPT Profile Managerがアカウントごとに用意する専用の保存先です。ログイン状態やアプリデータをアカウントごとに分けます。\n\n"
+                        fallback: "ChatGPTの既存環境は、ChatGPTが普段使っている保存先です。分離プロファイルは、ChatGPT Profile Managerがプロファイルごとに用意する専用の保存先です。ログイン状態やアプリデータをプロファイルごとに分けます。\n\n"
                     ),
                     font: bodyFont,
                     paragraphStyle: bodyParagraphStyle
@@ -2829,7 +3122,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                     content,
                     L10n.text(
                         "guide.safety.launch-body",
-                        fallback: "複数アカウントを使うときは、普段のChatGPTアイコンではなく、このアプリの「起動」から起動してください。異なるプロファイルは同時に起動できますが、同じプロファイルは二重起動できません。起動中のプロファイルは一覧に「起動中」と表示され、操作ボタンが「終了」に変わります。終了前には、進行中の作業がないか確認してください。\n\n"
+                        fallback: "複数のプロファイルを使うときは、普段のChatGPTアイコンではなく、このアプリの「起動」から起動してください。異なるプロファイルは同時に起動できますが、同じプロファイルは二重起動できません。起動中のプロファイルは一覧に「起動中」と表示され、操作ボタンが「開く」に変わります。終了前には、プロファイルの「…」メニューからChatGPTを終了してください。\n\n"
                     ),
                     font: bodyFont,
                     paragraphStyle: bodyParagraphStyle
@@ -3085,8 +3378,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         let alert = NSAlert()
         alert.alertStyle = .informational
         alert.messageText = launcher.accounts.isEmpty
-            ? L10n.text("account.add.first-title", fallback: "最初のアカウントを追加します")
-            : L10n.text("account.add.title", fallback: "アカウントを追加します")
+            ? L10n.text("account.add.first-title", fallback: "最初のプロファイルを追加します")
+            : L10n.text("account.add.title", fallback: "プロファイルを追加します")
         alert.informativeText = L10n.text(
             "account.add.message",
             fallback: "ChatGPT Profile Managerで表示する分かりやすい名前を入力してください。メールアドレスそのものを使う必要はありません。"
@@ -3114,7 +3407,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                 error,
                 title: L10n.text(
                     "account.name-invalid-title",
-                    fallback: "アカウント名を使用できません"
+                    fallback: "プロファイル名を使用できません"
                 )
             )
             DispatchQueue.main.async { [weak self] in
@@ -3182,7 +3475,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         )
         alert.informativeText = L10n.text(
             "storage-choice.message",
-            fallback: "このアカウントでChatGPTが使う保存先を選びます。既存環境を使うと普段のプロジェクトやチャットをそのまま開きます。分離プロファイルを使うと、このアカウント専用の保存先を使います。"
+            fallback: "このプロファイルでChatGPTが使う保存先を選びます。既存環境を使うと普段のプロジェクトやチャットをそのまま開きます。分離プロファイルを使うと、このプロファイル専用の保存先を使います。"
         )
         alert.addButton(
             withTitle: L10n.text("storage-choice.add-button", fallback: "この保存先で追加")
@@ -3230,7 +3523,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                 ),
                 description: L10n.text(
                     "storage-choice.new.description",
-                    fallback: "このアカウント専用の保存先を新しく作成する"
+                    fallback: "このプロファイル専用の保存先を新しく作成する"
                 ),
                 isEnabled: true
             ),
@@ -3353,7 +3646,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         )
         alert.informativeText = L10n.text(
             "existing-assignment.message",
-            fallback: "ChatGPTの既存環境をこのアカウントに割り当てます。紐づけられるのは1アカウントだけで、既存データのコピーや移動は行いません。確定後に追加するアカウントは、すべて分離プロファイルになります。"
+            fallback: "ChatGPTの既存環境をこのプロファイルに割り当てます。紐づけられるのは1プロファイルだけで、既存データのコピーや移動は行いません。確定後に追加するプロファイルは、すべて分離プロファイルになります。"
         )
         alert.addButton(
             withTitle: L10n.text(
@@ -3416,7 +3709,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                 error,
                 title: L10n.text(
                     "account.add.error-title",
-                    fallback: "アカウントを追加できませんでした"
+                    fallback: "プロファイルを追加できませんでした"
                 )
             )
         }
@@ -3512,7 +3805,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                 error,
                 title: L10n.text(
                     "account.rename.error-title",
-                    fallback: "アカウント名を変更できませんでした"
+                    fallback: "プロファイル名を変更できませんでした"
                 )
             )
         }
@@ -3524,7 +3817,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                 ProfileManagerError.accountNotFound,
                 title: L10n.text(
                     "account.delete.error-title",
-                    fallback: "アカウント登録を削除できませんでした"
+                    fallback: "プロファイル登録を削除できませんでした"
                 )
             )
             return
@@ -3535,7 +3828,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                 ProfileManagerError.linkedAccountCannotBeDeleted,
                 title: L10n.text(
                     "account.delete.error-title",
-                    fallback: "アカウント登録を削除できませんでした"
+                    fallback: "プロファイル登録を削除できませんでした"
                 )
             )
             return
@@ -3550,7 +3843,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         )
         alert.informativeText = L10n.text(
             "account.delete.message",
-            fallback: "アカウントの登録だけを削除します。分離プロファイルの保存フォルダ、ログイン状態、設定、セッション、ログなどはそのまま残り、後からアカウント追加時に「既存の分離プロファイルを使う」を選ぶと、同じ保存先を再登録できます。既存環境は変更されません。"
+            fallback: "プロファイルの登録だけを削除します。分離プロファイルの保存フォルダ、ログイン状態、設定、セッション、ログなどはそのまま残り、後からプロファイル追加時に「既存の分離プロファイルを使う」を選ぶと、同じ保存先を再登録できます。既存環境は変更されません。"
         )
         alert.addButton(
             withTitle: L10n.text("account.delete.confirm", fallback: "プロファイルを削除")
@@ -3577,19 +3870,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                 error,
                 title: L10n.text(
                     "account.delete.error-title",
-                    fallback: "アカウント登録を削除できませんでした"
+                    fallback: "プロファイル登録を削除できませんでした"
                 )
             )
         }
     }
 
-    @objc
-    private func generateProfileLauncher(_ sender: NSButton) {
-        guard
-            let rawID = sender.identifier?.rawValue,
-            let accountID = UUID(uuidString: rawID),
-            let account = launcher.accounts.first(where: { $0.id == accountID })
-        else {
+    private func generateProfileLauncher(accountID: UUID) {
+        guard let account = launcher.accounts.first(where: { $0.id == accountID }) else {
             presentError(ProfileManagerError.accountNotFound)
             return
         }
@@ -3600,11 +3888,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             alert.alertStyle = .informational
             alert.messageText = L10n.text(
                 "launcher.generated-title",
-                fallback: "起動アプリを作成しました"
+                fallback: "プロファイル起動用アプリを作成しました"
             )
             alert.informativeText = L10n.text(
                 "launcher.generated-message",
-                fallback: "「{name}」専用の起動アプリを作成しました。Finderで表示し、Dockへドラッグすると、このプロファイルを直接起動できます。",
+                fallback: "「{name}」専用のプロファイル起動用アプリを作成しました。Finderで表示し、Dockへドラッグすると、このプロファイルを直接起動できます。",
                 replacing: ["name": account.name]
             )
             alert.addButton(
@@ -3623,7 +3911,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                 error,
                 title: L10n.text(
                     "launcher.error.title",
-                    fallback: "起動アプリを作成できませんでした"
+                    fallback: "プロファイル起動用アプリを作成できませんでした"
                 )
             )
         }
@@ -3640,7 +3928,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             return
         }
 
-        launchAccount(accountID)
+        if let account = launcher.accounts.first(where: { $0.id == accountID }) {
+            openOrFocusAccount(account)
+        }
     }
 
     private func launchAccountFromLauncher(_ accountID: UUID) {
@@ -3662,7 +3952,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                 ProfileManagerError.accountNotFound,
                 title: L10n.text(
                     "launcher.error.title",
-                    fallback: "起動アプリを実行できませんでした"
+                    fallback: "プロファイル起動用アプリを実行できませんでした"
                 )
             )
             return
@@ -3691,12 +3981,402 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         }
     }
 
+    private func showDiagnostics(accountID: UUID) {
+        guard let account = launcher.accounts.first(where: { $0.id == accountID }),
+              account.id != launcher.existingEnvironmentAccount?.id else { return }
+        guard !diagnosticsExecutionState.blocksApplicationTermination else { return }
+        diagnosticsAccountID = accountID
+        if let diagnosticsWindow, diagnosticsWindow.isVisible {
+            diagnosticsTitleLabel?.stringValue = account.name
+            diagnosticsWindow.makeKeyAndOrderFront(nil)
+            startDiagnostics(force: true)
+            return
+        }
+
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 650, height: 380), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        window.title = L10n.text("diagnostics.window-title", fallback: "プロファイルの診断")
+        window.isReleasedWhenClosed = false
+        window.minSize = NSSize(width: 540, height: 320)
+        window.delegate = self
+        let content = NSView()
+        window.contentView = content
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 10
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 20),
+            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20),
+            stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 18),
+            stack.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -18)
+        ])
+        let title = NSTextField(labelWithString: account.name)
+        title.font = .systemFont(ofSize: 17, weight: .semibold)
+        stack.addArrangedSubview(title)
+        diagnosticsTitleLabel = title
+        let summary = NSTextField(wrappingLabelWithString: "")
+        summary.font = .systemFont(ofSize: 13, weight: .medium)
+        summary.maximumNumberOfLines = 2
+        stack.addArrangedSubview(summary)
+        diagnosticsSummaryLabel = summary
+        let details = NSTextView()
+        details.isEditable = false
+        details.isSelectable = true
+        details.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        details.backgroundColor = .textBackgroundColor
+        details.textContainerInset = NSSize(width: 8, height: 8)
+        let scroll = NSScrollView()
+        scroll.documentView = details
+        scroll.hasVerticalScroller = true
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        stack.addArrangedSubview(scroll)
+        scroll.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        scroll.heightAnchor.constraint(equalToConstant: 150).isActive = true
+        diagnosticsDetailsView = details
+        let buttons = NSStackView()
+        buttons.orientation = .horizontal
+        buttons.spacing = 8
+        let diagnose = NSButton(title: L10n.text("diagnostics.run", fallback: "診断を実行"), target: self, action: #selector(runDiagnosticsAction))
+        let relocate = NSButton(title: L10n.text("diagnostics.relocate", fallback: "保存先を再指定"), target: self, action: #selector(relocateProfileAction))
+        let rebuild = NSButton(title: L10n.text("diagnostics.rebuild", fallback: "索引を再構築"), target: self, action: #selector(rebuildProfileIndexAction))
+        let logs = NSButton(title: L10n.text("diagnostics.logs", fallback: "修復ログを表示"), target: self, action: #selector(showDiagnosticLogsAction))
+        diagnose.bezelStyle = .rounded
+        diagnose.keyEquivalent = "\r"
+        buttons.addArrangedSubview(diagnose)
+        let maintenance = NSButton(
+            title: L10n.text("diagnostics.more", fallback: "メンテナンス"),
+            target: self,
+            action: #selector(showDiagnosticsMaintenanceMenu(_:))
+        )
+        maintenance.bezelStyle = .rounded
+        buttons.addArrangedSubview(maintenance)
+        diagnosticsRunButton = diagnose
+        diagnosticsRelocateButton = relocate
+        diagnosticsRebuildButton = rebuild
+        diagnosticsLogsButton = logs
+        diagnosticsMoreButton = maintenance
+        stack.addArrangedSubview(buttons)
+        let progress = NSProgressIndicator()
+        progress.style = .spinning
+        progress.controlSize = .small
+        progress.isIndeterminate = true
+        progress.isDisplayedWhenStopped = false
+        progress.translatesAutoresizingMaskIntoConstraints = false
+        stack.insertArrangedSubview(progress, at: 2)
+        diagnosticsProgressIndicator = progress
+        diagnosticsWindow = window
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        startDiagnostics()
+    }
+
+    @objc private func showDiagnosticsMaintenanceMenu(_ sender: NSButton) {
+        guard !isDiagnosticsRunning else { return }
+        let menu = NSMenu()
+        let relocate = NSMenuItem(
+            title: L10n.text("diagnostics.relocate", fallback: "保存先を再指定…"),
+            action: #selector(relocateProfileAction),
+            keyEquivalent: ""
+        )
+        relocate.target = self
+        relocate.isEnabled = diagnosticsRelocateButton?.isEnabled ?? false
+        menu.addItem(relocate)
+
+        let rebuild = NSMenuItem(
+            title: L10n.text("diagnostics.rebuild", fallback: "索引を再構築…"),
+            action: #selector(rebuildProfileIndexAction),
+            keyEquivalent: ""
+        )
+        rebuild.target = self
+        rebuild.isEnabled = diagnosticsRebuildButton?.isEnabled ?? false
+        menu.addItem(rebuild)
+
+        menu.addItem(.separator())
+        let logs = NSMenuItem(
+            title: L10n.text("diagnostics.logs", fallback: "修復ログを表示…"),
+            action: #selector(showDiagnosticLogsAction),
+            keyEquivalent: ""
+        )
+        logs.target = self
+        logs.isEnabled = diagnosticsLogsButton?.isEnabled ?? false
+        menu.addItem(logs)
+        menu.popUp(
+            positioning: nil,
+            at: NSPoint(x: sender.bounds.minX, y: sender.bounds.maxY + 4),
+            in: sender
+        )
+    }
+
+    @objc private func runDiagnosticsAction() { startDiagnostics() }
+
+    private func startDiagnostics(force: Bool = false) {
+        guard (force || !isDiagnosticsRunning),
+              !diagnosticsExecutionState.blocksApplicationTermination,
+              let accountID = diagnosticsAccountID,
+              let account = launcher.accounts.first(where: { $0.id == accountID }),
+              let baseDirectory = try? launcher.profileBaseDirectory()
+        else { return }
+
+        if isDiagnosticsRunning {
+            diagnosticsTask?.cancel()
+            diagnosticsTask = nil
+            diagnosticsExecutionState = .idle
+        }
+        diagnosticsExecutionState = .diagnosing
+        diagnosticsSummaryLabel?.stringValue = L10n.text(
+            "diagnostics.running",
+            fallback: "診断を実行中…"
+        )
+        diagnosticsDetailsView?.string = ""
+        let task = Task { [weak self] in
+            let outcome = await Task.detached(priority: .userInitiated) { @Sendable in
+                let service = ProfileDiagnosticsService(
+                    baseDirectory: baseDirectory,
+                    fileManager: FileManager.default
+                )
+                return service.diagnose(profile: account)
+            }.value
+
+            guard !Task.isCancelled, let self,
+                  self.diagnosticsAccountID == accountID,
+                  self.diagnosticsWindow != nil
+            else { return }
+            self.diagnosticsExecutionState = .idle
+            self.applyDiagnosticsReport(outcome)
+            self.diagnosticsTask = nil
+        }
+        diagnosticsTask = task
+    }
+
+    private func applyDiagnosticsReport(_ report: ProfileDiagnosticReport) {
+        let status: String
+        switch report.status {
+        case .healthy: status = L10n.text("diagnostics.status.healthy", fallback: "正常")
+        case .needsAttention: status = L10n.text("diagnostics.status.attention", fallback: "要確認")
+        case .missing: status = L10n.text("diagnostics.status.missing", fallback: "保存先不明")
+        case .unknown: status = L10n.text("diagnostics.status.unknown", fallback: "不明")
+        }
+        diagnosticsSummaryLabel?.stringValue = L10n.text(
+            "diagnostics.summary",
+            fallback: "状態: {status} · 検出件数: {count}",
+            replacing: ["status": status, "count": "\(report.findings.count)"]
+        )
+        let checklist = diagnosticsChecklist(report)
+        let findings = report.findings.isEmpty
+            ? L10n.text("diagnostics.no-findings", fallback: "問題は検出されませんでした。")
+            : report.findings.map { finding in
+                let location = finding.path.map { "\n  \($0)" } ?? ""
+                return "[\(finding.severity.rawValue.uppercased())] \(finding.code): \(finding.message)\(location)"
+            }.joined(separator: "\n\n")
+        diagnosticsDetailsView?.string = checklist + "\n\n" + findings
+        diagnosticsRebuildButton?.isEnabled = report.sqlite.contains(where: {
+            $0.knownSchema && URL(fileURLWithPath: $0.path).lastPathComponent.hasPrefix("state_")
+        }) && report.status != .missing
+    }
+
+    private func diagnosticsChecklist(_ report: ProfileDiagnosticReport) -> String {
+        var lines: [String] = []
+        func add(_ key: String, checks: [String]) {
+            let present = checks.filter { report.checks[$0] != nil }
+            guard !present.isEmpty else { return }
+            let passed = present.allSatisfy { report.checks[$0] == true }
+            let fallback: String
+            switch key {
+            case "diagnostics.check.storage": fallback = "プロファイル保存先"
+            case "diagnostics.check.codex-home": fallback = "CODEX_HOME"
+            case "diagnostics.check.permissions": fallback = "ファイル権限"
+            case "diagnostics.check.settings": fallback = "設定ファイル"
+            default: fallback = key
+            }
+            let label = L10n.text(key, fallback: fallback)
+            lines.append(
+                L10n.text(
+                    passed ? "diagnostics.check.passed" : "diagnostics.check.failed",
+                    fallback: passed ? "✓ {name}" : "! {name}",
+                    replacing: ["name": label]
+                )
+            )
+        }
+        add("diagnostics.check.storage", checks: ["rootExists", "rootIsDirectory"])
+        add("diagnostics.check.codex-home", checks: ["codexHomeExists", "electronUserDataExists"])
+        add("diagnostics.check.permissions", checks: ["rootReadable", "rootWritable"])
+        add("diagnostics.check.settings", checks: ["settingsRegistryReadable"])
+        if !report.sqlite.isEmpty {
+            let passed = report.sqlite.allSatisfy { $0.knownSchema && $0.quickCheckPassed && $0.foreignKeyCheckPassed }
+            lines.append(
+                L10n.text(
+                    passed ? "diagnostics.check.passed" : "diagnostics.check.failed",
+                    fallback: passed ? "✓ {name}" : "! {name}",
+                    replacing: [
+                        "name": L10n.text("diagnostics.check.index", fallback: "SQLite索引")
+                    ]
+                )
+            )
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private func updateDiagnosticsControls() {
+        let enabled = !isDiagnosticsRunning
+        diagnosticsRunButton?.isEnabled = enabled
+        diagnosticsRelocateButton?.isEnabled = enabled
+        diagnosticsRebuildButton?.isEnabled = enabled && diagnosticsRebuildButton?.isEnabled == true
+        diagnosticsLogsButton?.isEnabled = enabled
+        diagnosticsMoreButton?.isEnabled = enabled
+        if isDiagnosticsRunning {
+            diagnosticsProgressIndicator?.startAnimation(nil)
+        } else {
+            diagnosticsProgressIndicator?.stopAnimation(nil)
+        }
+    }
+
+    @objc private func relocateProfileAction() {
+        guard !isDiagnosticsRunning, let accountID = diagnosticsAccountID else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = L10n.text("diagnostics.relocate", fallback: "保存先を再指定")
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let bookmark = try? url.bookmarkData(
+                options: [.withSecurityScope],
+                includingResourceValuesForKeys: nil,
+                relativeTo: nil
+            )
+            _ = try launcher.updateProfileLocation(id: accountID, root: url, bookmarkData: bookmark)
+            refreshUI()
+            startDiagnostics()
+            showTransientStatus(L10n.text("diagnostics.relocated", fallback: "保存先を更新しました。"))
+        } catch {
+            presentError(error, title: L10n.text("diagnostics.error-title", fallback: "保存先を更新できませんでした"))
+        }
+    }
+
+    @objc private func rebuildProfileIndexAction() {
+        guard !isDiagnosticsRunning, let accountID = diagnosticsAccountID else { return }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = L10n.text("diagnostics.rebuild-confirm-title", fallback: "SQLiteの参照パスを修復しますか？")
+        alert.informativeText = L10n.text("diagnostics.rebuild-confirm-message", fallback: "ChatGPTを終了している必要があります。変更前のSQLiteはスナップショットへ保存されます。一意に対応づけられる移動済みJSONLの参照だけを更新し、欠落行や派生索引は再生成しません。")
+        alert.addButton(withTitle: L10n.text("diagnostics.rebuild", fallback: "索引を再構築"))
+        alert.addButton(withTitle: L10n.text("common.cancel", fallback: "キャンセル"))
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        guard diagnosticsAccountID == accountID,
+              let account = launcher.accounts.first(where: { $0.id == accountID }),
+              let baseDirectory = try? launcher.profileBaseDirectory()
+        else { return }
+        let runningAtStart = launcher.isAccountRunning(id: accountID)
+        guard !runningAtStart else {
+            presentError(
+                ProfileManagerError.codexMustBeClosed,
+                title: L10n.text("diagnostics.error-title", fallback: "索引を再構築できませんでした")
+            )
+            return
+        }
+
+        diagnosticsTask?.cancel()
+        diagnosticsTask = nil
+        diagnosticsExecutionState = .repairing
+        diagnosticsSummaryLabel?.stringValue = L10n.text(
+            "diagnostics.repair-running",
+            fallback: "索引の保守的な修復を実行中…"
+        )
+        diagnosticsDetailsView?.string = ""
+        let task = Task { @MainActor [weak self] in
+            let outcome = await Task.detached(priority: .userInitiated) { @Sendable in
+                let service = ProfileDiagnosticsService(
+                    baseDirectory: baseDirectory,
+                    fileManager: FileManager.default,
+                    isChatGPTRunning: { runningAtStart }
+                )
+                do {
+                    return DiagnosticsRepairOutcome.success(try service.repairIndex(profile: account))
+                } catch {
+                    return DiagnosticsRepairOutcome.failure(error.localizedDescription)
+                }
+            }.value
+
+            guard let self else { return }
+            let shouldReflect = !Task.isCancelled
+                && self.diagnosticsAccountID == accountID
+                && self.diagnosticsWindow != nil
+            self.diagnosticsExecutionState = .idle
+            self.diagnosticsTask = nil
+            guard shouldReflect else { return }
+            switch outcome {
+            case let .success(result):
+                self.diagnosticsSummaryLabel?.stringValue = L10n.text(
+                    "diagnostics.repaired",
+                    fallback: "移動済みJSONLの参照パスを修復しました（{count}件）。",
+                    replacing: ["count": "\(result.updatedPathCount)"]
+                )
+                self.diagnosticsDetailsView?.string = [
+                    "updated=\(result.updatedPathCount)",
+                    "skipped=\(result.skippedAmbiguousCount)",
+                    "snapshot=\(result.snapshotDirectory.path)",
+                    "log=\(result.logURL.path)"
+                ].joined(separator: "\n")
+                self.showTransientStatus(L10n.text(
+                    "diagnostics.repaired",
+                    fallback: "移動済みJSONLの参照パスを修復しました（{count}件）。",
+                    replacing: ["count": "\(result.updatedPathCount)"]
+                ))
+            case let .failure(message):
+                self.diagnosticsSummaryLabel?.stringValue = message
+                self.diagnosticsDetailsView?.string = L10n.text(
+                    "diagnostics.repair-failed",
+                    fallback: "修復に失敗しました。詳細は修復ログを確認してください。"
+                )
+                self.presentError(
+                    DiagnosticsTaskError(message: message),
+                    title: L10n.text("diagnostics.error-title", fallback: "索引を再構築できませんでした")
+                )
+            }
+        }
+        diagnosticsTask = task
+    }
+
+    @objc private func showDiagnosticLogsAction() {
+        guard !isDiagnosticsRunning, let accountID = diagnosticsAccountID else { return }
+        do {
+            let account = try launcher.accountForDiagnostics(id: accountID)
+            let base = try launcher.profileBaseDirectory()
+            let service = ProfileDiagnosticsService(baseDirectory: base)
+            let logs = service.logURLs().compactMap { service.readLog(at: $0) }.filter { $0.profileID == account.profileID }
+            diagnosticsDetailsView?.string = logs.isEmpty
+                ? L10n.text("diagnostics.logs-empty", fallback: "修復ログはありません。")
+                : logs.map { "\($0.finishedAt): \($0.result) / updated=\($0.updatedPathCount), rollback=\($0.result == "rollback")" }.joined(separator: "\n")
+        } catch {
+            diagnosticsDetailsView?.string = error.localizedDescription
+        }
+    }
+
     @objc
     private func quitAccount(_ sender: NSButton) {
         guard
+            let accountID = accountID(from: sender)
+        else {
+            refreshUI()
+            return
+        }
+        quitAccount(accountID: accountID)
+    }
+
+    @objc
+    private func quitAccountFromMenu(_ sender: NSMenuItem) {
+        guard let accountID = accountID(from: sender) else {
+            presentError(ProfileManagerError.accountNotFound)
+            return
+        }
+        quitAccount(accountID: accountID)
+    }
+
+    private func quitAccount(accountID: UUID) {
+        guard
             !isLaunching,
-            let rawID = sender.identifier?.rawValue,
-            let accountID = UUID(uuidString: rawID),
             let account = launcher.accounts.first(where: { $0.id == accountID }),
             launcher.isAccountRunning(id: accountID)
         else {
@@ -3781,7 +4461,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         alert.alertStyle = .warning
         alert.messageText = title ?? L10n.text(
             "account.open.error-title",
-            fallback: "アカウントを起動できませんでした"
+            fallback: "プロファイルを起動できませんでした"
         )
         alert.informativeText = error.localizedDescription
         alert.addButton(withTitle: L10n.text("common.ok", fallback: "OK"))

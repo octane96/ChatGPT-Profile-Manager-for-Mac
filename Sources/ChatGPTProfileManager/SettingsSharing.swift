@@ -6,6 +6,7 @@ import Foundation
 enum ProfileStorageReference: Codable, Equatable, Hashable, Sendable {
     case existingEnvironment
     case isolated(directoryName: String)
+    case isolatedProfile(profileID: UUID)
 
     var stableKey: String {
         switch self {
@@ -13,6 +14,8 @@ enum ProfileStorageReference: Codable, Equatable, Hashable, Sendable {
             return "existing-environment"
         case let .isolated(directoryName):
             return "isolated:\(directoryName.lowercased())"
+        case let .isolatedProfile(profileID):
+            return "isolated-profile:\(profileID.uuidString.lowercased())"
         }
     }
 }
@@ -217,16 +220,77 @@ final class SettingsSharingStore {
     func loadRegistry() -> SettingsRegistry {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        guard let data = try? Data(contentsOf: roots.registryURL),
-              let registry = try? decoder.decode(SettingsRegistry.self, from: data)
-        else {
-            return SettingsRegistry()
+        for url in [roots.registryURL, roots.legacyRegistryURL] {
+            guard let data = try? Data(contentsOf: url),
+                  let registry = try? decoder.decode(SettingsRegistry.self, from: data)
+            else {
+                continue
+            }
+            return registry
         }
-        return registry
+        return SettingsRegistry()
     }
 
     func binding(for profile: ProfileStorageReference) -> SettingsBinding? {
         loadRegistry().bindings.first { $0.profile == profile }
+    }
+
+    /// Migrates a pre-stable-identity reference in SettingsRegistry.json. It
+    /// updates the registry atomically and leaves the shared files/symlinks
+    /// untouched, so a moved profile keeps its sharing membership.
+    @discardableResult
+    func migrateProfileReference(
+        from oldReference: ProfileStorageReference,
+        to newReference: ProfileStorageReference
+    ) throws -> Bool {
+        guard oldReference != newReference else { return false }
+        var registry = loadRegistry()
+        var changed = false
+
+        for index in registry.bindings.indices where registry.bindings[index].profile == oldReference {
+            registry.bindings[index] = SettingsBinding(
+                profile: newReference,
+                groupID: registry.bindings[index].groupID,
+                items: registry.bindings[index].items
+            )
+            changed = true
+        }
+        for index in registry.groups.indices {
+            var members = registry.groups[index].members
+            let originalCount = members.count
+            members.removeAll { $0 == oldReference }
+            if members.count != originalCount {
+                if !members.contains(newReference) { members.append(newReference) }
+                members.sort { $0.stableKey < $1.stableKey }
+                registry.groups[index].members = members
+                registry.groups[index].updatedAt = Date()
+                let groupDirectory = roots.sharedSettings.appendingPathComponent(registry.groups[index].id.uuidString, isDirectory: true)
+                if fileManager.fileExists(atPath: groupDirectory.path) {
+                    try saveGroupManifest(registry.groups[index], in: groupDirectory)
+                }
+                changed = true
+            }
+        }
+        for index in registry.cloneHistory.indices {
+            let record = registry.cloneHistory[index]
+            let source = record.source == oldReference ? newReference : record.source
+            let destination = record.destination == oldReference ? newReference : record.destination
+            if source != record.source || destination != record.destination {
+                registry.cloneHistory[index] = SettingsCloneRecord(
+                    id: record.id,
+                    source: source,
+                    destination: destination,
+                    items: record.items,
+                    createdAt: record.createdAt,
+                    backupDirectoryName: record.backupDirectoryName
+                )
+                changed = true
+            }
+        }
+        if changed {
+            try saveRegistry(registry)
+        }
+        return changed
     }
 
     func group(id: UUID) -> SettingsGroup? {
@@ -634,12 +698,17 @@ private struct SettingsRoots {
     let profileSettings: URL
     let backups: URL
     let registryURL: URL
+    let legacyRegistryURL: URL
 
     init(baseDirectory: URL) {
         root = baseDirectory.appendingPathComponent("Settings", isDirectory: true)
         sharedSettings = root.appendingPathComponent("SharedSettings", isDirectory: true)
         profileSettings = root.appendingPathComponent("ProfileSettings", isDirectory: true)
         backups = root.appendingPathComponent("Backups", isDirectory: true)
-        registryURL = root.appendingPathComponent("SettingsRegistry.json")
+        // The registry is a manager-level manifest, alongside Profiles and
+        // Settings. Keep the old nested location as a read-only migration
+        // source so existing installations are not abandoned.
+        registryURL = baseDirectory.appendingPathComponent("SettingsRegistry.json")
+        legacyRegistryURL = root.appendingPathComponent("SettingsRegistry.json")
     }
 }

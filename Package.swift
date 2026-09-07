@@ -17,7 +17,8 @@ let package = Package(
         .executableTarget(
             name: "ChatGPTProfileManager",
             linkerSettings: [
-                .linkedFramework("AppKit")
+                .linkedFramework("AppKit"),
+                .linkedLibrary("sqlite3")
             ]
         ),
         .testTarget(
