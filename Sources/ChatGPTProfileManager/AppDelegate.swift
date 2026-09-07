@@ -106,8 +106,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     private weak var guidePreviousButton: NSButton?
     private weak var guideNextButton: NSButton?
     private var shouldPrepareInitialAccountAfterGuide = false
-    private weak var launchStatusTitleLabel: NSTextField?
-    private weak var launchStatusDetailLabel: NSTextField?
     private var statusLabel: NSTextField?
     private var accountCountLabel: NSTextField?
     private var tableView: NSTableView?
@@ -390,92 +388,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         heroStack.addArrangedSubview(heroLabels)
         mainStack.addArrangedSubview(heroStack)
 
-        let launchStatusCard = ProfileCardView()
-        launchStatusCard.layer?.cornerRadius = 10
-        launchStatusCard.layer?.backgroundColor = NSColor.controlAccentColor
-            .withAlphaComponent(0.08)
-            .cgColor
-        launchStatusCard.layer?.borderColor = NSColor.controlAccentColor
-            .withAlphaComponent(0.22)
-            .cgColor
-        launchStatusCard.translatesAutoresizingMaskIntoConstraints = false
-        launchStatusCard.setAccessibilityLabel(
-            L10n.text(
-                "last-launched.accessibility-label",
-                fallback: "最後に起動したプロファイル"
-            )
-        )
-
-        let launchStatusStack = NSStackView()
-        launchStatusStack.orientation = .horizontal
-        launchStatusStack.alignment = .centerY
-        launchStatusStack.spacing = 10
-        launchStatusStack.translatesAutoresizingMaskIntoConstraints = false
-        launchStatusCard.addSubview(launchStatusStack)
-        NSLayoutConstraint.activate([
-            launchStatusStack.leadingAnchor.constraint(equalTo: launchStatusCard.leadingAnchor, constant: 14),
-            launchStatusStack.trailingAnchor.constraint(equalTo: launchStatusCard.trailingAnchor, constant: -14),
-            launchStatusStack.topAnchor.constraint(equalTo: launchStatusCard.topAnchor, constant: 10),
-            launchStatusStack.bottomAnchor.constraint(equalTo: launchStatusCard.bottomAnchor, constant: -10)
-        ])
-
-        let launchStatusIcon = NSImageView(
-            image: NSImage(
-                systemSymbolName: "clock.arrow.circlepath",
-                accessibilityDescription: L10n.text(
-                    "last-launched.title",
-                    fallback: "最後に起動"
-                )
-            ) ?? NSImage()
-        )
-        launchStatusIcon.symbolConfiguration = NSImage.SymbolConfiguration(
-            pointSize: 17,
-            weight: .semibold
-        )
-        launchStatusIcon.contentTintColor = .controlAccentColor
-        launchStatusIcon.imageScaling = .scaleProportionallyUpOrDown
-        launchStatusIcon.translatesAutoresizingMaskIntoConstraints = false
-        launchStatusStack.addArrangedSubview(launchStatusIcon)
-        NSLayoutConstraint.activate([
-            launchStatusIcon.widthAnchor.constraint(equalToConstant: 24),
-            launchStatusIcon.heightAnchor.constraint(equalToConstant: 24)
-        ])
-
-        let launchStatusLabels = NSStackView()
-        launchStatusLabels.orientation = .vertical
-        launchStatusLabels.alignment = .leading
-        launchStatusLabels.spacing = 2
-
-        let launchStatusTitleLabel = NSTextField(
-            labelWithString: L10n.text(
-                "last-launched.title",
-                fallback: "最後に起動"
-            )
-        )
-        launchStatusTitleLabel.font = .systemFont(ofSize: 11, weight: .semibold)
-        launchStatusTitleLabel.textColor = .secondaryLabelColor
-        launchStatusLabels.addArrangedSubview(launchStatusTitleLabel)
-
-        let launchStatusDetailLabel = NSTextField(labelWithString: "—")
-        launchStatusDetailLabel.font = .systemFont(ofSize: 13, weight: .semibold)
-        launchStatusDetailLabel.textColor = .labelColor
-        launchStatusDetailLabel.lineBreakMode = .byTruncatingTail
-        launchStatusDetailLabel.maximumNumberOfLines = 1
-        launchStatusDetailLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        launchStatusLabels.addArrangedSubview(launchStatusDetailLabel)
-        launchStatusStack.addArrangedSubview(launchStatusLabels)
-        launchStatusLabels.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-        let launchStatusSpacer = NSView()
-        launchStatusSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        launchStatusStack.addArrangedSubview(launchStatusSpacer)
-
-        mainStack.addArrangedSubview(launchStatusCard)
-        launchStatusCard.widthAnchor.constraint(equalTo: mainStack.widthAnchor).isActive = true
-        launchStatusCard.heightAnchor.constraint(greaterThanOrEqualToConstant: 56).isActive = true
-        self.launchStatusTitleLabel = launchStatusTitleLabel
-        self.launchStatusDetailLabel = launchStatusDetailLabel
-
         let accountHeader = NSStackView()
         accountHeader.orientation = .horizontal
         accountHeader.alignment = .centerY
@@ -658,43 +570,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         let accounts = launcher.accounts
         accountCountLabel?.stringValue = L10n.accountCount(accounts.count)
 
-        updateLaunchStatus()
         statusLabel?.stringValue = ""
         statusLabel?.isHidden = true
 
         tableView?.reloadData()
         updateTableHeight(accountCount: accounts.count)
         updateControlAvailability()
-    }
-
-    private func updateLaunchStatus() {
-        launchStatusTitleLabel?.stringValue = L10n.text(
-            "last-launched.title",
-            fallback: "最後に起動"
-        )
-        if let lastAccount = launcher.lastLaunchedAccount {
-            let environment = lastAccount.id == launcher.existingEnvironmentAccount?.id
-                ? L10n.text("profile.existing", fallback: "既存環境")
-                : L10n.text("profile.isolated", fallback: "分離プロファイル")
-            launchStatusDetailLabel?.stringValue = L10n.text(
-                "last-launched.detail",
-                fallback: "{name}（{environment}）",
-                replacing: [
-                    "name": lastAccount.name,
-                    "environment": environment
-                ]
-            )
-        } else if launcher.accounts.isEmpty {
-            launchStatusDetailLabel?.stringValue = L10n.text(
-                "last-launched.empty",
-                fallback: "プロファイルを追加するとここに表示されます"
-            )
-        } else {
-            launchStatusDetailLabel?.stringValue = L10n.text(
-                "last-launched.none",
-                fallback: "このアプリから起動したプロファイルはありません"
-            )
-        }
     }
 
     private func showTransientStatus(_ message: String) {
