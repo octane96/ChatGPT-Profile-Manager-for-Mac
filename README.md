@@ -10,6 +10,16 @@ ChatGPT Profile Manager is a macOS app for managing separate local environments 
 > OpenAIまたはChatGPTの公式製品ではありません。OpenAIの名称・ロゴなど第三者の商標・素材は、このリポジトリのMIT Licenseの対象外です。
 > This project is not an official OpenAI or ChatGPT product. OpenAI and ChatGPT names, logos, and other third-party marks or assets are not covered by this repository's MIT License.
 
+## 画面イメージ / Screenshot
+
+<p align="center">
+  <img src="docs/images/profile-manager-mock.png" alt="ChatGPT Profile Managerのメイン画面（モックデータ） / ChatGPT Profile Manager main window with mock data" width="900">
+</p>
+
+画面に表示されているプロファイル名、メールアドレス、利用状況などは説明用のモックデータです。実際のアカウント情報ではありません。
+
+The profile names, email addresses, usage figures, and other values shown are mock data for illustration and are not real account information.
+
 ## これは何を分けるのか / What is separated
 
 このアプリが分離するのは、macOS上のChatGPT実行環境です。サーバー側のアカウントやOpenAIのクラウドデータを作成・移動するものではありません。
