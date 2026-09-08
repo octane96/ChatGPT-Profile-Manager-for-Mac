@@ -1,186 +1,335 @@
 # ChatGPT Profile Manager for Mac
 
-ChatGPTデスクトップアプリのCodexビューを、複数のChatGPTプロファイルで使い分けるためのmacOS用ヘルパーアプリです。
+ChatGPTデスクトップアプリのローカル環境を、プロファイルごとに分けて管理するmacOSアプリです。複数のChatGPTアカウントを、それぞれ独立したログイン状態・チャット・プロジェクト・Codex環境で使用できます。
 
-## 現在のバージョン
+ChatGPT Profile Manager is a macOS app for managing separate local environments for the ChatGPT desktop app. Each profile can keep its own sign-in state, chats, projects, and Codex data so that multiple ChatGPT accounts can be used independently.
 
-**1.0.0**（macOS 14以降）
+**バージョン / Version:** 1.0.0（macOS 14以降 / macOS 14 or later）
 
-## ダウンロード
+> **非公式アプリ / Unofficial app**
+> OpenAIまたはChatGPTの公式製品ではありません。OpenAIの名称・ロゴなど第三者の商標・素材は、このリポジトリのMIT Licenseの対象外です。
+> This project is not an official OpenAI or ChatGPT product. OpenAI and ChatGPT names, logos, and other third-party marks or assets are not covered by this repository's MIT License.
 
-- [ChatGPT Profile Manager 1.0.0（macOS）](outputs/ChatGPT-Profile-Manager-macOS.zip)
-- [ソースコード](outputs/ChatGPT-Profile-Manager-Source.zip)
+## これは何を分けるのか / What is separated
 
-## 主な機能
+このアプリが分離するのは、macOS上のChatGPT実行環境です。サーバー側のアカウントやOpenAIのクラウドデータを作成・移動するものではありません。
 
-- プロファイルを任意の数登録
-- 既存環境がある場合、初回起動時にメールアドレスを表示名として自動登録
-- プロファイル追加時に、ChatGPTの既存環境・新しい分離プロファイル・既存の分離プロファイルから使う保存先を選択
-- ChatGPTの既存環境へ紐づけられるプロファイルは1つだけ。紐づけ確定後に追加するプロファイルは分離プロファイル
-- プロファイル名の変更
-- 行のドラッグ＆ドロップによる並び替え（順序は保存）
-- 既存の分離プロファイルを保存先として登録
-- 分離プロファイルの登録削除（保存フォルダは保持）
-- プロファイル一覧にプラン名を表示
-- プロファイルごとのログイン状態とメールアドレスを表示
-- プロファイル一覧に5時間枠・週間枠の残り率とリセット時刻を表示
-- 利用状況の手動更新と、5時間枠・週間枠のリセット通知
-- アプリ内の「仕組みを見る」ガイド
-- 初回起動時の「仕組みを見る」チュートリアル表示
-- Macの言語設定に合わせた日本語・英語表示
-- 設定画面から表示言語を「Macの設定に従う」、「日本語」、「English」で切り替え
-- 異なるプロファイルのChatGPTを同時に起動
-- 起動中プロファイルの表示と、同じ保存先の二重起動防止
-- 起動中プロファイルのChatGPTをプロファイルメニューから個別に終了
-- プロファイル間の設定コピー（バックアップ付き）
-- 設定コピー前の変更内容プレビューと、直前のコピーの復元
-- 複数プロファイル間の設定共有グループ
-- 共有グループの一覧表示
-- 共有設定の解除と現在設定の保持
-- 分離プロファイルごとのDock用起動アプリ生成
-- 起動アプリの更新が必要な場合の表示
-- 分離プロファイルの診断（保存先、マーカー、設定共有、SQLite索引）
-- 管理情報（プロファイル一覧・共有グループの管理情報）の破損検出とバックアップ復元
-- 移動・削除された保存先の検出と保存先の再指定（フォルダは移動・コピーしません）
-- SQLiteの参照パス修復前のスナップショットと機械可読な修復ログ
+This app separates the local runtime environment on macOS. It does not create, move, or merge server-side accounts or OpenAI cloud data.
 
-## 使い方
-
-1. `ChatGPT Profile Manager.app` を起動します。
-2. 初回起動時は「このアプリの仕組み」が表示されます。ページを確認して「完了」を押してください。
-3. 既存環境がある場合は、最初のプロファイルがメールアドレスを表示名として自動登録されます。既存環境がない場合は、「プロファイルを追加」から任意の表示名を入力します。
-4. 2件目以降を追加する場合は、「プロファイルを追加」から名前を入力し、「このプロファイルで使う保存先を選択」で保存先を選びます。「ChatGPTの既存環境を使う」、「新しい分離プロファイルを作る」、「既存の分離プロファイルを使う」から選べます。
-5. 既存の分離プロファイルを使う場合は、一覧から保存先ディレクトリを選びます。登録されていない既存フォルダの登録も、同じ選択画面から行えます。フォルダのコピーや移動は行いません。
-6. 一覧の「起動」を押すと、他のChatGPTを終了せず、選択したプロファイルを別インスタンスとして起動します。起動中のプロファイルは「開く」に変わり、既存ウィンドウを前面に表示します。同じ保存先は複数起動できません。
-7. プロファイル行の「…」メニューから、そのプロファイルの設定共有・設定コピー・診断・保存先を開く・Dock用起動アプリ作成・ChatGPT終了・プロファイル削除を実行できます。設定変更時は対象プロファイルのChatGPTを終了してください。
-8. 「Dock用起動アプリを作成…」で分離プロファイル専用の起動用アプリを作成します。Finderで表示されたアプリをDockへドラッグすると、そのプロファイルを直接起動できます。ChatGPTの既存環境にはChatGPTアプリ自身のDock機能があるため、この項目は表示されません。
-9. 分離プロファイルの「…」メニューから「プロファイルを診断…」を開くと、保存先、CodexHome/ElectronUserData、識別マーカー、設定共有リンク、SQLiteの`quick_check`/外部キー/セッション参照を確認できます。修復操作は診断ウィンドウの「メンテナンス」にまとめています。
-
-10. 設定コピーを実行する前に、コピー元にない項目・新規項目・変更項目・変更なしの項目を確認できます。コピー先の既存設定はバックアップされ、プロファイルの「…」メニューから直前のコピー前へ復元できます。
-11. 「管理」の「共有グループ」では、共有グループ名、参加プロファイル、共有項目、最終更新日時を一覧できます。プロファイルカードには共有中のグループ名も表示されます。
-12. 設定の「利用上限リセットを通知」は初期状態では無効です。有効にすると、取得した利用状況の5時間枠・週間枠のリセット時刻にmacOS通知を予約します。macOSの通知許可が必要です。通知を無効にしても、利用状況の表示や手動更新には影響しません。
-
-分離プロファイルを初めて起動したときは、そのプロファイルで使用するChatGPTアカウントにログインしてください。
-
-## 表示言語
-
-初期設定は「Macの設定に従う」です。Macの言語設定で最も優先されている言語が日本語の場合は日本語、それ以外の場合は英語で表示します。「管理」の「設定」から日本語またはEnglishを明示的に選ぶこともでき、変更はすぐに画面へ反映されます。表示言語が変わっても、登録済みのプロファイル名、プロファイルの保存先、データは変更されません。
-
-## 環境の種類と紐づけの違い
-
-このアプリでは、保存先を「環境」として管理します。ChatGPTの既存環境と分離プロファイルは別のものです。プロファイル追加時は、両者を同じ「使う保存先」の選択画面で比較できます。
-
-| 種類・操作 | 意味 |
+| 種類 / Type | 内容 / Behavior |
 | --- | --- |
-| ChatGPTの既存環境／「ChatGPTの既存環境を使う」 | ChatGPTが普段使っている既定の保存先を、プロファイル一覧の1プロファイルに割り当てます。既存のプロジェクト、チャット、設定、ログイン状態はそのままです。 |
-| 新しい分離プロファイル／「新しい分離プロファイルを作る」 | ChatGPT Profile Managerが、そのプロファイル専用の保存先を新しく作ります。 |
-| 既存の分離プロファイル／「既存の分離プロファイルを使う」 | すでに`Profiles`フォルダにある分離プロファイルを、プロファイル一覧へ登録します。フォルダのコピーや移動は行いません。 |
+| **ChatGPTの既存環境**<br>Existing ChatGPT environment | ChatGPTが通常使用する既定の保存先を、一覧の1プロファイルに割り当てます。既存のログイン状態、チャット、プロジェクト、設定をそのまま使います。<br>Assigns ChatGPT's normal storage to one profile and keeps its existing sign-in state, chats, projects, and settings. |
+| **分離プロファイル**<br>Isolated profile | ChatGPT Profile Managerがプロファイル専用の保存先を作成します。別のアカウントでログインでき、他のプロファイルとローカル状態を分離します。<br>Creates dedicated storage for the profile. You can sign in with another account while keeping local state separate from other profiles. |
 
-上の選択は、同じ画面で保存先を比較しながら選べるようにしています。「ChatGPTの既存環境を使う」は既存環境をプロファイルに割り当て、「既存の分離プロファイルを使う」は既存フォルダを一覧に登録します。
+分離はアカウント、OSユーザー、サーバー側ワークスペースの境界ではありません。強い分離が必要な場合は、macOSのユーザーアカウントを分けてください。
 
-### ChatGPTの既存環境
+This is not an account, OS-user, or server-side workspace boundary. Use separate macOS user accounts when you need a stronger boundary.
 
-ChatGPTの既存環境へ紐づけたプロファイルは、現在のChatGPT環境をコピーせず、そのまま使用します。既存のプロジェクト、チャット、設定、ログイン情報は移動されません。既存環境へ紐づけられるプロファイルは1つだけです。
+## 動作要件 / Requirements
 
-### 分離プロファイル
+- macOS 14以降 / macOS 14 or later
+- ChatGPTデスクトップアプリ / ChatGPT desktop app
+- 利用状況を表示する場合は、検出可能なCodexコマンドとログイン状態が必要です / Usage information requires a discoverable Codex command and a signed-in profile
 
-既存環境へ紐づけなかったプロファイルは、プロファイルごとに分離プロファイルを使います。分離プロファイルでは、次の2つをプロファイルごとに分けます。
+## インストール / Install
 
-- `CODEX_HOME`：Codexの設定、認証、セッション、ログ、スキルなど
-- `CODEX_ELECTRON_USER_DATA_PATH`：ChatGPTデスクトップアプリ側のCookie、ログイン状態、アプリデータ
+### 配布版 / Download
 
-分離プロファイルの保存先は次のとおりです。新しく作成する場合は `account-表示名-短いID` の形式でディレクトリを作るため、Finderでもプロファイルを見分けられます。既存のディレクトリ名は変更せず、そのまま登録して使えます。
+リポジトリの配布用アーカイブをダウンロードして展開し、`ChatGPT Profile Manager.app`を`/Applications`へ移動します。
 
-`~/Library/Application Support/ChatGPT Profile Manager/Profiles/`
+Download the distribution archive from this repository, unpack it, and move `ChatGPT Profile Manager.app` to `/Applications`.
 
-## 設定の共有とコピー
+- [macOS用アーカイブ / macOS archive](outputs/ChatGPT-Profile-Manager-macOS.zip)
 
-プロファイル行の「…」メニューから、次の2つの操作を利用できます。
+現在のローカル配布版はad-hoc署名です。初回起動時にmacOSの警告が表示される場合があります。Developer ID署名と公証を行ったリリースは別途提供します。
 
-| 操作 | 動作 |
+The current local distribution is ad-hoc signed. macOS may show a warning on first launch. A Developer ID-signed and notarized release will be provided separately.
+
+### Homebrew
+
+Homebrew Cask対応は準備中です。現時点では公開tapは提供していないため、次のコマンドはまだ使用できません。
+
+Homebrew Cask support is being prepared. No public tap is available yet, so the following command is not available at this time:
+
+```sh
+brew install --cask octane96/homebrew-tap/chatgpt-profile-manager
+```
+
+## クイックスタート / Quick start
+
+1. `ChatGPT Profile Manager.app`を起動します。
+   Launch `ChatGPT Profile Manager.app`.
+2. 既存のChatGPT環境が見つかった場合、最初のプロファイルがメールアドレスを表示名として自動登録されます。
+   If an existing ChatGPT environment is found, the first profile is registered automatically using its email address as the display name.
+3. 既存環境がない場合、または追加のプロファイルを作る場合は「プロファイルを追加」を選びます。
+   If no existing environment is found, or when adding another profile, choose **Add Profile**.
+4. 保存先として、次のいずれかを選びます。
+   Choose one of the following storage options:
+   - ChatGPTの既存環境を使う / Use the existing ChatGPT environment
+   - 新しい分離プロファイルを作る / Create a new isolated profile
+   - 既存の分離プロファイルを使う / Use an existing isolated profile
+5. 分離プロファイルを初めて起動したときは、その保存先で使うChatGPTアカウントにログインします。
+   Sign in to the ChatGPT account you want to use the first time you launch an isolated profile.
+6. プロファイル一覧の「起動」を押します。起動中は「開く」に変わり、既存ウィンドウを前面に表示します。異なる保存先のプロファイルは並列起動できます。
+   Select **Launch** in the profile list. While running, it changes to **Open** and brings the existing window forward. Profiles with different storage locations can run in parallel.
+
+同じ保存先の二重起動は安全のため防止されます。起動中プロファイルを終了する場合は、そのプロファイルの`…`メニューから「ChatGPTを終了」を選びます。
+
+The same storage location cannot be launched twice. To quit a running profile, choose **Quit ChatGPT** from that profile's `…` menu.
+
+## プロファイルの操作 / Profile operations
+
+メイン画面には日常操作だけを表示します。
+
+The main window shows only everyday actions.
+
+| 状態 / State | Primary action |
 | --- | --- |
-| 設定を共有 | アプリ管理下の共有グループを作り、参加プロファイルが同じ設定を参照します。共有グループは特定のプロファイルを親にしません。 |
-| 設定をコピー | コピー元からコピー先へ通常ファイルとして一度だけ複製します。コピー先の既存設定はバックアップされます。 |
+| 停止中 / Stopped | **起動 / Launch** |
+| 起動中 / Running | **開く / Open** |
 
-対象はCodexのローカル設定です。初期状態では`AGENTS.md`が選択され、`config.toml`、`rules`、`AGENTS.override.md`は必要に応じて選べます。`rules`はサンドボックス外のコマンド実行許可に影響するため、選択前に内容を確認してください。
+プロファイル名の横にある鉛筆アイコンでは表示名だけを変更できます。行をドラッグすると一覧の順序を変更できます。
 
-認証情報、`auth.json`、セッション、ログ、SQLite索引、Cookie、`ElectronUserData`、ChatGPTのプロジェクトやチャットは共有・コピーされません。`config.toml`の共有は、認証情報、アカウント固有値、または共有対象外の項目が検出された場合は安全のため停止します。`config.toml`のコピーを選ぶ場合は、内容を確認してください。
+Use the pencil icon next to a profile name to change only its display name. Drag a row to reorder the profile list.
 
-共有グループとバックアップはプロファイル本体と別の場所に保存されます。
+各プロファイルの`…`メニューには、そのプロファイル固有の操作をまとめています。
+
+The `…` menu contains profile-specific management operations:
+
+- Finderで保存先を開く / Open storage in Finder
+- Dock用起動アプリを作成・再作成 / Create or recreate a Dock launch app
+- 設定の共有、共有設定の管理 / Share settings or manage shared settings
+- 別のプロファイルから設定をコピー / Copy settings from another profile
+- 最後の設定コピーを復元 / Restore the last settings copy
+- プロファイルを診断 / Diagnose the profile
+- ChatGPTを終了 / Quit ChatGPT
+- プロファイルを削除（分離プロファイルの登録のみ） / Delete the profile registration (isolated profiles only)
+
+既存環境に割り当てたプロファイルは削除できません。分離プロファイルを削除しても、保存フォルダやデータは削除されず、登録情報だけが一覧から外れます。
+
+The profile assigned to the existing environment cannot be deleted. Deleting an isolated profile removes only its registration; its folder and data remain and can be registered again later.
+
+## 保存場所と起動の仕組み / Storage and launch model
+
+分離プロファイルは次の場所に保存されます。
+
+Isolated profiles are stored below:
 
 ```text
 ~/Library/Application Support/ChatGPT Profile Manager/
 ├── Profiles/
+│   └── account-<display-name>-<short-ID>/
+│       ├── CodexHome/
+│       ├── ElectronUserData/
+│       └── .chatgpt-profile-manager-profile.json
 ├── Settings/
 │   ├── SharedSettings/
 │   └── Backups/
+├── Diagnostics/
+│   └── Logs/
+├── Recovery/
+│   └── RepairSnapshots/
 └── SettingsRegistry.json
 ```
 
-共有解除時は共通設定をプロファイルへ実体化してからリンクを外すため、現在の設定は保持されます。プロファイルの登録だけを削除しても、設定共有グループや保存フォルダは削除されません。
+- `CodexHome/`は、`CODEX_HOME`としてCodexの設定、認証、セッション、ログなどに使われます。
+  `CodexHome/` is selected as `CODEX_HOME` for Codex settings, authentication, sessions, logs, and related data.
+- `ElectronUserData/`は、ChatGPTデスクトップアプリのCookie、ログイン状態、アプリデータに使われます。
+  `ElectronUserData/` stores local Electron data for the ChatGPT desktop app, including cookies, sign-in state, and app data.
+- 起動時に`CODEX_HOME`、`CODEX_ELECTRON_USER_DATA_PATH`、`--user-data-dir`をプロファイル専用のパスへ指定します。
+  At launch, `CODEX_HOME`, `CODEX_ELECTRON_USER_DATA_PATH`, and `--user-data-dir` point to the profile-specific paths.
+- アプリは既存環境やクラウド上のプロジェクト・チャットをコピー・移動しません。
+  The app does not copy or move the existing environment or cloud projects and chats.
+- 保存先フォルダ名には表示名と短いIDを含め、Finderで見分けられるようにしています。
+  Folder names include the display name and a short ID so profiles are recognizable in Finder.
 
-## プロファイル起動用アプリ
+`Diagnostics/`と`Recovery/`は診断・修復を実行した場合に作成されます。
+`Diagnostics/` and `Recovery/` are created when diagnosis or repair is run.
 
-プロファイル起動用アプリは、分離プロファイルの保存先を指定してChatGPTを直接起動する専用の`.app`です。ChatGPTアプリが標準の場所にない場合は、互換用にChatGPT Profile Managerへ処理を引き継ぎます。別のプロファイルは並列起動できますが、同じ保存先を二重起動することはできません。ChatGPTの既存環境は対象外です。
+## 設定の共有とコピー / Share and copy settings
 
-プロファイル起動用アプリはプロファイル名を使った名前で、次の場所に保存されます。
+プロファイルの`…`メニューから、設定の共有または一度だけの設定コピーを実行できます。
 
-```text
-~/Library/Application Support/ChatGPT Profile Manager/Launchers/
-└── ChatGPT <プロファイル名>.app
-```
+From a profile's `…` menu, you can share settings continuously or copy them once.
 
-プロファイル起動用アプリごとにプロファイル名、色・頭文字付きのアイコンを生成します。頭文字はキャメルケースや空白・ハイフン・アンダースコアを単語の区切りとして抽出し、先頭2単語の頭文字を使います。そのため`ShareFair`、`share-fair`、`share_fair`はいずれも`SF`になります。単語が1つだけの場合は先頭2文字を使います。Dockへの追加はmacOSの仕様上、作成後にFinderからDockへドラッグして行います。プロファイル名を変更した場合は、分離プロファイルの「…」メニューから「Dock用起動アプリを再作成…」を選ぶと名前、表示名、アイコンを更新できます。
+### 設定の共有 / Share settings
 
-## 利用上限の表示
+共有グループを作成すると、作成元プロファイル自身が参加し、追加するプロファイルと共有項目を選択できます。共有後の変更は参加プロファイルに共通のファイルへ反映されます。
 
-プロファイル一覧には、各プロファイルのCodex利用状況を次の2枠で表示します。
+When you create a shared settings group, the source profile joins automatically. Select additional profiles and the settings to share. Later changes are reflected through the shared files for all members.
 
-- 5H：直近5時間の利用枠
-- 週間：週間の利用枠
+共有対象は次の4項目です。
 
-利用状況を取得できた場合は、同じ行に現在のプラン名も表示します。
+The four available items are:
 
-表示される割合は「残り」です。5Hは `残り XX% HH:MMにリセット`、週間は `残り XX% M月D日 HH:MMにリセット` の形式で、24時間表示します。利用できる上限リセットクレジットがある場合は、週間行の下に `上限リセットX件` と有効期限を表示します。複数件ある場合は期限を一行ずつ表示します。ラベルのツールチップでは使用済みの割合とリセット日時を確認できます。ローカルのCodexコマンドが見つからない場合、未ログインの場合、または通信できない場合は「—」と表示されます。認証情報や利用状況をChatGPT Profile Managerの設定へ保存することはありません。
+- `AGENTS.md`（指示 / instructions）
+- `config.toml`（一般設定 / general configuration）
+- `rules`（実行ルール / execution rules）
+- `AGENTS.override.md`（上書き指示 / override instructions）
 
-「利用状況を更新」ボタンまたはアプリを再び前面に表示したときに再取得します。取得中・取得失敗はプロファイルカードのプラン表示に状態を付けて示します。
+`config.toml`に認証情報、アカウント固有値、または共有対象外の項目が含まれる場合、共有は停止して対象項目を表示します。`rules`はコマンド実行の許可・確認に影響するため、信頼できる内容だけを共有してください。設定変更の前には、参加するすべてのChatGPTを終了してください。
 
-## 削除について
+Sharing stops when `config.toml` contains credentials, account-specific values, or unsupported items, and the blocked items are shown. `rules` affects command permission and confirmation behavior, so share it only when trusted. Quit ChatGPT in every participating profile before changing shared settings.
 
-### 分離プロファイルの登録削除
+共有グループの名前、参加プロファイル、共有項目、最終更新日時は「設定」内の「共有グループ」で確認できます。
 
-「削除」を実行すると、プロファイルの登録情報だけを削除します。分離プロファイルの保存フォルダ、ログイン状態、設定、セッション、ログなどは残ります。後からプロファイル追加時に「既存の分離プロファイルを使う」を選ぶと、同じ保存先を再登録できます。そのプロファイルが起動中の場合は、対応するChatGPTを終了してから実行してください。
+The group name, members, shared items, and last update time are shown under **Shared Groups** in **Settings**.
 
-既存環境へ紐づいたプロファイルは削除できません。既存のプロジェクトやチャットを保護するためです。既存環境の紐づけは初回起動時に自動で確定し、後から変更する操作はありません。
+### 設定をコピー / Copy settings
 
-### 診断・修復について
+「別のプロファイルから設定をコピー…」では、コピー元とコピー先（現在のプロファイル）を明示します。実行前に項目ごとの差分を確認できます。
 
-各分離プロファイルのルートには、機密情報を含まない`.chatgpt-profile-manager-profile.json`マーカーが保存されます。登録IDとは別の永続`profileID`を持つため、登録を削除しても残ったフォルダを安全に再発見できます。既存の`accountsV2`は読み込み時に後方互換移行され、旧プロファイルにはマーカーが付与されます。
+**Copy Settings from Another Profile…** makes the source and destination explicit. A per-item diff is shown before the copy runs.
 
-SQLiteの索引修復は、JSONL先頭の`session_meta.payload.id`と`threads(id, rollout_path)`が一意に対応する場合だけ、欠落した参照パスを現在の実ファイルへ更新します。これは索引全体の再構築ではなく、移動による参照ずれを直す保守的な修復です。削除済み・重複・未知スキーマのデータや欠落行を推測して作ることはありません。`thread_history_1.sqlite`などの派生索引は診断のみで変更せず、失敗時はトランザクションをロールバックします。修復履歴は`Diagnostics/Logs`、スナップショットは`Recovery/RepairSnapshots/<operationID>`に、トークン・Cookie・チャット本文を記録せず保存します。
+コピーは一度だけの複製です。コピー先の同名設定は`Settings/Backups/`へバックアップしてから置き換えます。直前のコピーは「最後の設定コピーを復元…」で戻せます。
 
-「設定」には、管理情報の状態も表示されます。プロファイル一覧または共有グループの管理情報が読み込めない場合はメイン画面に警告を表示し、バックアップが利用可能なら設定画面から復元できます。復元は現在の破損した一覧を上書きしますが、プロファイル本体の保存フォルダは削除しません。
+Copying is a one-time clone. Existing destination settings are backed up under `Settings/Backups/` before replacement. The immediately preceding copy can be restored with **Restore the Last Settings Copy…**.
 
-## 注意事項
+共有・コピーの対象外 / Never shared or copied:
 
-- 異なるプロファイルは並列起動できますが、同じプロファイルの二重起動はできません
-- 「…」メニューの「ChatGPTを終了」は、確認ダイアログの後に対応するプロファイルのChatGPTだけを終了します
-- ChatGPTを終了すると、対応するプロファイルの「起動中」表示が解除されます
-- 複数プロファイルを使うときは、普段のChatGPT／Codexアイコンではなく、このアプリの「起動」から起動してください
-- このアプリはOpenAI公式機能ではありません
-- アカウントの利用上限を回避する目的では使用しないでください
+- `auth.json`、認証情報 / `auth.json` and authentication data
+- セッション、ログ、SQLite索引 / sessions, logs, and SQLite indexes
+- Cookie、`ElectronUserData` / cookies and `ElectronUserData`
+- ChatGPTのチャット、プロジェクト / ChatGPT chats and projects
 
-## 開発とビルド
+## プロファイルの診断 / Profile diagnostics
+
+分離プロファイルの`…`メニューから「プロファイルを診断…」を開けます。診断は読み取り中心で、修復を自動実行しません。
+
+Choose **Diagnose Profile…** from an isolated profile's `…` menu. Diagnosis is primarily read-only; it does not automatically repair anything.
+
+診断対象 / Checks include:
+
+- プロファイル保存先の存在・種類・権限 / storage existence, type, and permissions
+- `CodexHome`と`ElectronUserData` / `CodexHome` and `ElectronUserData`
+- 識別マーカーと設定ファイル / identity marker and settings files
+- 設定共有レジストリとシンボリックリンク / settings registry and symbolic links
+- SQLiteの`quick_check`、外部キー、対応スキーマ / SQLite `quick_check`, foreign keys, and supported schema
+- セッションJSONLの欠落、重複、未索引参照 / missing, duplicate, and unindexed session JSONL references
+
+問題がある場合は「メンテナンス」から次を実行できます。
+
+When findings exist, **Maintenance** provides:
+
+- 保存先を再指定 / Choose the storage location again
+- 索引の保守的な修復 / Repair SQLite references conservatively
+- 修復ログを表示 / Show repair logs
+
+索引修復では、JSONLのセッションIDとSQLite参照が一意に対応する移動済み参照だけを更新します。推測による行の新規作成や、派生索引の再生成は行いません。変更前のスナップショットと機械可読なログを保存し、失敗時はロールバックします。
+
+Index repair updates only moved references whose JSONL session ID and SQLite row match unambiguously. It does not guess missing rows or rebuild derived indexes. A pre-change snapshot and machine-readable log are saved, and failed transactions are rolled back.
+
+## プロファイル起動用アプリ / Profile launch apps
+
+分離プロファイルの`…`メニューから、そのプロファイル専用の起動用アプリを作成できます。作成したアプリをFinderで表示し、Dockへドラッグしてください。
+
+From an isolated profile's `…` menu, create a launch app dedicated to that profile. Reveal it in Finder and drag it to the Dock.
+
+- アプリ名は`ChatGPT <プロファイル名>.app`です。 / The app is named `ChatGPT <profile-name>.app`.
+- プロファイル名から色付きの2文字アイコンを生成します。`ShareFair`、`share-fair`、`share_fair`はいずれも`SF`になります。 / A colored two-letter icon is generated from the profile name. `ShareFair`, `share-fair`, and `share_fair` all become `SF`.
+- 異なるプロファイルは並列起動できますが、同じ保存先は二重起動できません。 / Different profiles can run in parallel, but the same storage cannot be launched twice.
+- 既存環境プロファイルにはこの項目を表示しません。 / This option is not shown for the existing-environment profile.
+- プロファイル名を変更した後は、起動用アプリを再作成して名前とアイコンを更新します。 / Recreate the launch app after renaming a profile to update its name and icon.
+
+起動用アプリはインストール済みのChatGPT.appを呼び出します。ChatGPT.app自体を複製、置換、再署名するものではありません。
+
+Launch apps invoke the installed ChatGPT.app. They do not clone, replace, or re-sign the ChatGPT.app bundle.
+
+## 利用状況と通知 / Usage and notifications
+
+プロファイルカードには、取得できた場合にプラン名、5時間枠、週間枠、上限リセットクレジットを表示します。割合は残りの割合です。
+
+When available, profile cards show the plan, five-hour window, weekly window, and limit-reset credits. Percentages indicate the remaining amount.
+
+- 5H：残り%と24時間表記のリセット時刻 / 5H: remaining percentage and reset time in 24-hour format
+- 週間：残り%と月日・24時間表記のリセット時刻 / Weekly: remaining percentage and reset date/time
+- 上限リセット：件数と有効期限（複数件は一覧表示） / Limit resets: count and expiration dates
+
+「利用状況を更新」またはアプリを再び前面に表示したときに再取得します。設定で「利用上限リセットを通知」を有効にすると、5H・週間枠のリセット時刻にmacOS通知を予約します。通知は初期状態では無効です。
+
+Usage is refreshed with **Refresh Usage** and when the app becomes active again. Enable **Notify when usage limits reset** in Settings to schedule macOS notifications for five-hour and weekly resets. Notifications are disabled by default.
+
+Codexコマンドが見つからない、未ログイン、または取得に失敗した場合は`—`と表示します。利用状況や認証情報をこのアプリの設定へ保存しません。
+
+The UI shows `—` when the Codex command is unavailable, the profile is not signed in, or retrieval fails. Usage data and credentials are not saved in this app's settings.
+
+## 設定 / Settings
+
+Settings contains app-wide preferences only:
+
+- 表示言語：Macの設定に従う、日本語、English / Display language: Follow Mac Settings, Japanese, or English
+- 利用上限リセットを通知 / Notify when usage limits reset
+- プロファイル一覧・共有グループの管理情報、ChatGPT.app・Codexコマンドの検出、バックアップ復元 / Management-data health, ChatGPT.app and Codex command detection, and backup restoration
+- 共有グループの一覧 / Shared group list
+
+プロファイル固有の共有・コピー・診断・保存先操作は、各プロファイルの`…`メニューにあります。
+
+Profile-specific sharing, copying, diagnosis, and storage actions are in each profile's `…` menu.
+
+## セキュリティとプライバシー / Security and privacy
+
+- このアプリはローカルの保存先を切り替えてChatGPTを起動します。OSのサンドボックスやサーバー側のアカウント分離を提供するものではありません。
+  The app launches ChatGPT with selected local storage. It does not provide an OS sandbox or server-side account isolation.
+- 認証情報、セッション、チャット、プロジェクトをプロファイル間で自動コピーしません。
+  Authentication, sessions, chats, and projects are not automatically copied between profiles.
+- 設定共有・コピーでは、設定ファイルやルールに機密値・実行可能な内容が含まれる可能性があります。内容と相手プロファイルを確認してください。
+  Shared or copied configuration may contain sensitive or executable content. Review the contents and the destination profiles.
+- ChatGPTの利用上限を回避する目的では使用しないでください。
+  Do not use this app to circumvent ChatGPT usage limits.
+
+## FAQ
+
+### これはOpenAI公式ですか？ / Is this official?
+
+いいえ。OpenAIとは提携していない非公式アプリです。
+No. This is an unofficial app and is not affiliated with OpenAI.
+
+### プロファイルを追加するとアカウントやデータがコピーされますか？ / Does adding a profile copy an account or data?
+
+いいえ。新しい分離プロファイルは空の保存先を作成し、初回起動時にユーザーがログインします。既存環境を選んだ場合も、既存の保存先をそのまま割り当てるだけです。
+No. A new isolated profile creates a separate storage location and you sign in on first launch. Choosing the existing environment only assigns its current storage.
+
+### プロファイルを削除するとデータも消えますか？ / Does deleting a profile delete its data?
+
+分離プロファイルの削除は登録解除だけです。保存フォルダは残り、後から「既存の分離プロファイルを使う」で再登録できます。
+Deleting an isolated profile unregisters it only. Its folder remains and can be registered again with **Use an Existing Isolated Profile**.
+
+### 複数のChatGPTを同時に起動できますか？ / Can profiles run at the same time?
+
+はい。異なる保存先のプロファイルは並列起動できます。同じ保存先の二重起動はできません。
+Yes. Profiles with different storage locations can run in parallel. The same storage location cannot be launched twice.
+
+### CLIとChatGPTアプリが同じアカウントだと保証されますか？ / Does the app verify CLI and ChatGPT account equality?
+
+いいえ。アプリはトークンやCookieを解析してアカウントの同一性を検証しません。各プロファイルで表示されるアカウントをユーザー自身で確認してください。
+No. The app does not inspect tokens or cookies to verify account identity. Confirm the account shown in each profile yourself.
+
+## 開発 / Development
 
 ```sh
 swift test
 swift build -c release
 ```
 
-配布用アプリ（ad-hoc署名付き）は次のスクリプトで生成できます。
+配布用アプリとZIPは次のスクリプトで作成できます。既存の同名出力がある場合は、スクリプトが上書きを防止して終了します。
+
+Build the app bundle and ZIP with the following script. If an output with the same name already exists, the script exits instead of overwriting it.
 
 ```sh
 ./package-app.sh
 ```
 
-署名・公証された公式配布アプリではなく、ローカルで使用する補助ツールです。
+生成物 / Outputs:
+
+- `outputs/ChatGPT Profile Manager.app`
+- `outputs/ChatGPT-Profile-Manager-macOS.zip`
+
+ローカルパッケージはad-hoc署名です。一般公開時はDeveloper ID署名、公証、リリースごとのSHA-256公開を追加してください。
+
+The local package is ad-hoc signed. Public distribution should add Developer ID signing, notarization, and a published SHA-256 checksum for each release.
+
+## ライセンス / License
+
+ソースコードは[MIT License](LICENSE)の下で公開しています。ライセンスの対象はこのリポジトリのソースコードです。ChatGPT、OpenAIの名称・ロゴ、macOSやChatGPTに含まれる第三者の素材・商標は対象外です。
+
+The source code is released under the [MIT License](LICENSE). The license covers the source code in this repository. ChatGPT and OpenAI names and logos, along with third-party assets and trademarks belonging to macOS or ChatGPT, are excluded.
