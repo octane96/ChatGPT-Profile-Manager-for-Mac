@@ -28,6 +28,7 @@ This is not an account, OS-user, or server-side workspace boundary. Use separate
 ## 動作要件 / Requirements
 
 - macOS 14以降 / macOS 14 or later
+- Apple Silicon（arm64）Mac / Apple Silicon (arm64) Mac
 - ChatGPTデスクトップアプリ / ChatGPT desktop app
 - 利用状況を表示する場合は、検出可能なCodexコマンドとログイン状態が必要です / Usage information requires a discoverable Codex command and a signed-in profile
 
@@ -47,12 +48,20 @@ The current local distribution is ad-hoc signed. macOS may show a warning on fir
 
 ### Homebrew
 
-Homebrew Cask対応は準備中です。現時点では公開tapは提供していないため、次のコマンドはまだ使用できません。
+Homebrew Caskからインストールできます。
 
-Homebrew Cask support is being prepared. No public tap is available yet, so the following command is not available at this time:
+The app is available as a Homebrew Cask:
 
 ```sh
-brew install --cask octane96/homebrew-tap/chatgpt-profile-manager
+brew install --cask octane96/tap/chatgpt-profile-manager
+```
+
+既存のインストールを更新する場合は、次のコマンドを使用します。
+
+To update an existing installation, run:
+
+```sh
+brew upgrade --cask octane96/tap/chatgpt-profile-manager
 ```
 
 ## クイックスタート / Quick start
