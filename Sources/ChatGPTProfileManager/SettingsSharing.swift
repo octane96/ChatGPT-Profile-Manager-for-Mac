@@ -141,7 +141,7 @@ enum SettingsSharingError: LocalizedError, Equatable {
     case groupNotFound
     case bindingNotFound
     case sourceSettingMissing(ManagedSetting)
-    case configContainsSensitiveValues
+    case configContainsSensitiveValues([String])
     case unsupportedSymlink
     case transactionFailed
 
@@ -178,10 +178,11 @@ enum SettingsSharingError: LocalizedError, Equatable {
                 fallback: "コピー元に{setting}がありません。",
                 replacing: ["setting": setting.displayName]
             )
-        case .configContainsSensitiveValues:
+        case let .configContainsSensitiveValues(items):
             return L10n.text(
                 "settings-sharing.error.config-sensitive",
-                fallback: "config.tomlに認証情報・アカウント固有値、または共有対象外の項目が含まれているため、共有できません。設定をコピーしてください。"
+                fallback: "config.tomlに共有対象外の項目が含まれています。\n\n共有できない項目：\n{items}\n\nconfig.tomlを共有対象から外してください。これらの設定を引き継ぐ場合は、設定コピーを利用して内容を確認してください。",
+                replacing: ["items": items.map { "• \($0)" }.joined(separator: "\n")]
             )
         case .unsupportedSymlink:
             return L10n.text(
@@ -203,6 +204,24 @@ struct SettingsOperationSummary: Equatable, Sendable {
     let backupDirectory: URL
 }
 
+enum SettingsRegistryHealthState: Equatable, Sendable {
+    case healthy
+    case missing
+    case corrupted
+}
+
+struct SettingsRegistryHealth: Equatable, Sendable {
+    let state: SettingsRegistryHealthState
+    let backupAvailable: Bool
+}
+
+struct SettingsCopyDiff: Equatable, Sendable {
+    let setting: ManagedSetting
+    let sourceExists: Bool
+    let destinationExists: Bool
+    let identical: Bool
+}
+
 final class SettingsSharingStore {
     private let fileManager: FileManager
     private let roots: SettingsRoots
@@ -216,6 +235,7 @@ final class SettingsSharingStore {
     }
 
     var registryURL: URL { roots.registryURL }
+    var registryBackupURL: URL { roots.registryBackupURL }
 
     func loadRegistry() -> SettingsRegistry {
         let decoder = JSONDecoder()
@@ -229,6 +249,48 @@ final class SettingsSharingStore {
             return registry
         }
         return SettingsRegistry()
+    }
+
+    func registryHealth() -> SettingsRegistryHealth {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let currentExists = fileManager.fileExists(atPath: roots.registryURL.path)
+        let legacyExists = fileManager.fileExists(atPath: roots.legacyRegistryURL.path)
+        let currentValid = (try? decoder.decode(SettingsRegistry.self, from: Data(contentsOf: roots.registryURL))) != nil
+        let legacyValid = (try? decoder.decode(SettingsRegistry.self, from: Data(contentsOf: roots.legacyRegistryURL))) != nil
+        let state: SettingsRegistryHealthState
+        if currentValid || legacyValid {
+            state = .healthy
+        } else if currentExists || legacyExists {
+            state = .corrupted
+        } else {
+            state = .missing
+        }
+        return SettingsRegistryHealth(
+            state: state,
+            backupAvailable: validRegistryData(at: roots.registryBackupURL) != nil
+        )
+    }
+
+    @discardableResult
+    func restoreRegistryFromBackup() throws -> SettingsRegistry {
+        guard let data = validRegistryData(at: roots.registryBackupURL) else {
+            throw SettingsSharingError.transactionFailed
+        }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let registry = try decoder.decode(SettingsRegistry.self, from: data)
+        try ensureDirectories()
+        let temporary = roots.root.appendingPathComponent(".SettingsRegistry-restore-\(UUID().uuidString).json")
+        try data.write(to: temporary, options: .atomic)
+        defer { try? fileManager.removeItem(at: temporary) }
+        if fileManager.fileExists(atPath: roots.registryURL.path) {
+            _ = try fileManager.replaceItemAt(roots.registryURL, withItemAt: temporary)
+        } else {
+            try fileManager.moveItem(at: temporary, to: roots.registryURL)
+        }
+        try? fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: roots.registryURL.path)
+        return registry
     }
 
     func binding(for profile: ProfileStorageReference) -> SettingsBinding? {
@@ -297,6 +359,10 @@ final class SettingsSharingStore {
         loadRegistry().groups.first { $0.id == id }
     }
 
+    func latestCloneRecord(destination: ProfileStorageReference) -> SettingsCloneRecord? {
+        loadRegistry().cloneHistory.first { $0.destination == destination }
+    }
+
     func ensureDirectories() throws {
         for directory in [roots.root, roots.sharedSettings, roots.profileSettings, roots.backups] {
             try fileManager.createDirectory(
@@ -326,6 +392,7 @@ final class SettingsSharingStore {
         try fileManager.createDirectory(at: backupDirectory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
 
         var backups: [(target: URL, backup: URL)] = []
+        var createdItems: [ManagedSetting] = []
         var changedTargets: [URL] = []
         do {
             for item in ordered(items) {
@@ -340,10 +407,15 @@ final class SettingsSharingStore {
                     let backupURL = backupDirectory.appendingPathComponent(item.fileName, isDirectory: item.isDirectory)
                     try fileManager.moveItem(at: destinationURL, to: backupURL)
                     backups.append((destinationURL, backupURL))
+                } else {
+                    createdItems.append(item)
                 }
                 changedTargets.append(destinationURL)
                 try copyResolved(sourceURL, to: destinationURL, isDirectory: item.isDirectory)
             }
+
+            let createdItemsURL = backupDirectory.appendingPathComponent("created-items.json")
+            try JSONEncoder().encode(createdItems).write(to: createdItemsURL, options: .atomic)
 
             var registry = loadRegistry()
             registry.cloneHistory.insert(
@@ -365,6 +437,74 @@ final class SettingsSharingStore {
             restore(backups)
             throw error is SettingsSharingError ? error : SettingsSharingError.transactionFailed
         }
+    }
+
+    func diff(
+        source: ProfileStorageReference,
+        destination: ProfileStorageReference,
+        items: Set<ManagedSetting>,
+        codexHomes: [ProfileStorageReference: URL]
+    ) throws -> [SettingsCopyDiff] {
+        guard source != destination,
+              let sourceHome = codexHomes[source],
+              let destinationHome = codexHomes[destination] else {
+            throw SettingsSharingError.sourceAndDestinationAreSame
+        }
+        return ordered(items).map { item in
+            let sourceURL = sourceHome.appendingPathComponent(item.fileName, isDirectory: item.isDirectory)
+            let destinationURL = destinationHome.appendingPathComponent(item.fileName, isDirectory: item.isDirectory)
+            let sourceData = contentData(at: sourceURL, isDirectory: item.isDirectory)
+            let destinationData = contentData(at: destinationURL, isDirectory: item.isDirectory)
+            return SettingsCopyDiff(
+                setting: item,
+                sourceExists: sourceData != nil,
+                destinationExists: destinationData != nil,
+                identical: sourceData != nil && sourceData == destinationData
+            )
+        }
+    }
+
+    @discardableResult
+    func restoreClone(
+        recordID: UUID,
+        destination: ProfileStorageReference,
+        codexHome: URL
+    ) throws -> [ManagedSetting] {
+        guard let record = loadRegistry().cloneHistory.first(where: {
+            $0.id == recordID && $0.destination == destination
+        }) else {
+            throw SettingsSharingError.transactionFailed
+        }
+        let backupDirectory = roots.backups.appendingPathComponent(record.backupDirectoryName, isDirectory: true)
+        guard fileManager.fileExists(atPath: backupDirectory.path) else {
+            throw SettingsSharingError.transactionFailed
+        }
+
+        let createdItemsURL = backupDirectory.appendingPathComponent("created-items.json")
+        let createdItems = (try? JSONDecoder().decode([ManagedSetting].self, from: Data(contentsOf: createdItemsURL))) ?? []
+        var restored: [ManagedSetting] = []
+        for item in record.items {
+            let target = codexHome.appendingPathComponent(item.fileName, isDirectory: item.isDirectory)
+            let backup = backupDirectory.appendingPathComponent(item.fileName, isDirectory: item.isDirectory)
+            if fileManager.fileExists(atPath: backup.path) {
+                if fileManager.fileExists(atPath: target.path) || isSymlink(target) {
+                    try fileManager.removeItem(at: target)
+                }
+                try fileManager.moveItem(at: backup, to: target)
+                restored.append(item)
+            } else if createdItems.contains(item) {
+                if fileManager.fileExists(atPath: target.path) || isSymlink(target) {
+                    try fileManager.removeItem(at: target)
+                }
+                restored.append(item)
+            }
+        }
+
+        var registry = loadRegistry()
+        registry.cloneHistory.removeAll { $0.id == recordID }
+        try saveRegistry(registry)
+        try? fileManager.removeItem(at: backupDirectory)
+        return restored
     }
 
     func createShareGroup(
@@ -412,8 +552,9 @@ final class SettingsSharingStore {
                 let sourceURL = sourceHome.appendingPathComponent(item.fileName, isDirectory: item.isDirectory)
                 let canonicalURL = groupDirectory.appendingPathComponent(item.fileName, isDirectory: item.isDirectory)
                 if item == .config, fileManager.fileExists(atPath: resolvedURL(sourceURL).path) {
-                    guard !configContainsSensitiveValues(at: sourceURL) else {
-                        throw SettingsSharingError.configContainsSensitiveValues
+                    let unsupported = try unsupportedConfigItems(at: sourceURL)
+                    guard unsupported.isEmpty else {
+                        throw SettingsSharingError.configContainsSensitiveValues(unsupported)
                     }
                 }
                 if fileManager.fileExists(atPath: resolvedURL(sourceURL).path) {
@@ -588,6 +729,10 @@ final class SettingsSharingStore {
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
         let data = try encoder.encode(registry)
+        if let currentData = validRegistryData(at: roots.registryURL) {
+            try? currentData.write(to: roots.registryBackupURL, options: .atomic)
+            try? fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: roots.registryBackupURL.path)
+        }
         let temporary = roots.registryURL.deletingLastPathComponent()
             .appendingPathComponent(".SettingsRegistry-\(UUID().uuidString).json")
         try data.write(to: temporary, options: .atomic)
@@ -597,6 +742,41 @@ final class SettingsSharingStore {
             try fileManager.moveItem(at: temporary, to: roots.registryURL)
         }
         try? fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: roots.registryURL.path)
+    }
+
+    private func validRegistryData(at url: URL) -> Data? {
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return (try? decoder.decode(SettingsRegistry.self, from: data)) == nil ? nil : data
+    }
+
+    private func contentData(at url: URL, isDirectory: Bool) -> Data? {
+        let resolved = resolvedURL(url)
+        guard fileManager.fileExists(atPath: resolved.path) else { return nil }
+        if !isDirectory {
+            return try? Data(contentsOf: resolved)
+        }
+        guard let enumerator = fileManager.enumerator(
+            at: resolved,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return nil
+        }
+        var result = Data()
+        let urls = enumerator.compactMap { $0 as? URL }
+            .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) != true }
+            .sorted { $0.path < $1.path }
+        for child in urls {
+            guard let data = try? Data(contentsOf: child) else { return nil }
+            let relative = child.path.replacingOccurrences(of: resolved.path + "/", with: "")
+            result.append(contentsOf: relative.utf8)
+            result.append(0)
+            result.append(data)
+            result.append(0)
+        }
+        return result
     }
 
     private func saveGroupManifest(_ group: SettingsGroup, in directory: URL) throws {
@@ -663,10 +843,12 @@ final class SettingsSharingStore {
         }
     }
 
-    private func configContainsSensitiveValues(at url: URL) -> Bool {
-        guard let text = try? String(contentsOf: resolvedURL(url), encoding: .utf8) else {
-            return true
-        }
+    private func unsupportedConfigItems(at url: URL) throws -> [String] {
+        let text = try String(contentsOf: resolvedURL(url), encoding: .utf8)
+        return Self.unsupportedConfigItems(in: text)
+    }
+
+    static func unsupportedConfigItems(in text: String) -> [String] {
         // Live sharing accepts only a small set of scalar, account-neutral
         // values. Any table, nested setting, unknown key, or malformed line is
         // rejected so new Codex settings cannot accidentally expose a secret.
@@ -681,14 +863,41 @@ final class SettingsSharingStore {
             "hide_agent_reasoning",
             "file_opener"
         ]
-        return text.split(whereSeparator: \.isNewline).contains { rawLine in
+        let known: [String: String] = [
+            "notify": "通知", "mcp_servers": "MCP接続", "plugins": "プラグイン",
+            "marketplaces": "プラグインの入手元", "desktop": "デスクトップ設定",
+            "projects": "プロジェクト設定", "approval_policy": "承認ポリシー",
+            "approvals_reviewer": "承認の確認方法", "sandbox_mode": "サンドボックス設定",
+            "features": "機能設定", "memories": "メモリ設定", "tui": "ターミナル表示設定",
+            "shell_environment_policy": "シェル環境設定", "model_providers": "モデル接続先",
+            "api_key": "APIキー"
+        ]
+        var result: [String] = []
+        var insideTable = false
+        for (index, rawLine) in text.components(separatedBy: .newlines).enumerated() {
             let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            guard !line.isEmpty, !line.hasPrefix("#") else { return false }
-            guard !line.hasPrefix("[") else { return true }
-            guard let equalsIndex = line.firstIndex(of: "=") else { return true }
-            let key = line[..<equalsIndex].trimmingCharacters(in: .whitespacesAndNewlines)
-            return !shareableKeys.contains(String(key))
+            guard !line.isEmpty, !line.hasPrefix("#") else { continue }
+            let isTable = line.hasPrefix("[")
+            if insideTable && !isTable { continue }
+            let key: String
+            if isTable {
+                insideTable = true
+                key = String(line.drop(while: { $0 == "[" }).prefix(while: { $0.isLetter || $0.isNumber || $0 == "_" || $0 == "-" }))
+            } else {
+                key = line.split(separator: "=", maxSplits: 1).first.map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
+                if line.contains("="), shareableKeys.contains(key) { continue }
+            }
+            // Only predefined names are rendered. Custom keys, table names,
+            // paths, comments and values may contain private data.
+            let label: String
+            if let name = known[key] {
+                label = "\(L10n.text("settings-sharing.unsupported.\(key)", fallback: name))（\(key)）"
+            } else {
+                label = L10n.text("settings-sharing.unsupported.other", fallback: "その他の共有対象外の設定（{line}行目）", replacing: ["line": "\(index + 1)"])
+            }
+            if !result.contains(label) { result.append(label) }
         }
+        return result
     }
 }
 
@@ -699,6 +908,7 @@ private struct SettingsRoots {
     let backups: URL
     let registryURL: URL
     let legacyRegistryURL: URL
+    let registryBackupURL: URL
 
     init(baseDirectory: URL) {
         root = baseDirectory.appendingPathComponent("Settings", isDirectory: true)
@@ -710,5 +920,6 @@ private struct SettingsRoots {
         // source so existing installations are not abandoned.
         registryURL = baseDirectory.appendingPathComponent("SettingsRegistry.json")
         legacyRegistryURL = root.appendingPathComponent("SettingsRegistry.json")
+        registryBackupURL = root.appendingPathComponent("SettingsRegistry.backup.json")
     }
 }

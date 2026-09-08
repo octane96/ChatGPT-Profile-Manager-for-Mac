@@ -560,6 +560,33 @@ final class ChatGPTProfileManagerTests: XCTestCase {
         XCTAssertFalse(script.contains("rm -rf \"$LOCK_DIRECTORY\""))
     }
 
+    func testProfileLauncherStatusDetectsMissingAndOutdatedLaunchers() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let account = AccountProfile(name: "開発")
+        let store = ProfileLauncherStore(baseDirectory: root)
+        XCTAssertEqual(store.status(for: account), .notCreated)
+
+        let launcherURL = try store.generate(for: account)
+        XCTAssertEqual(store.status(for: account), .current)
+
+        let plistURL = launcherURL.appendingPathComponent("Contents/Info.plist")
+        let plistData = try Data(contentsOf: plistURL)
+        var plist = try XCTUnwrap(
+            PropertyListSerialization.propertyList(from: plistData, format: nil) as? [String: Any]
+        )
+        plist["CFBundleDisplayName"] = "古い名前"
+        let updatedPlist = try PropertyListSerialization.data(
+            fromPropertyList: plist,
+            format: .xml,
+            options: 0
+        )
+        try updatedPlist.write(to: plistURL, options: .atomic)
+
+        XCTAssertEqual(store.status(for: account), .needsUpdate)
+    }
+
     func testStaleEmptyLauncherLockCanBeRecoveredWithoutRecursiveRemoval() throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -1233,6 +1260,118 @@ final class ChatGPTProfileManagerTests: XCTestCase {
         XCTAssertEqual(store.loadRegistry().cloneHistory.count, 1)
     }
 
+    func testSettingsCopyDiffReportsNewChangedSameAndMissingItems() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sourceHome = root.appendingPathComponent("source", isDirectory: true)
+        let destinationHome = root.appendingPathComponent("destination", isDirectory: true)
+        try FileManager.default.createDirectory(at: sourceHome, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: destinationHome, withIntermediateDirectories: true)
+        try Data("same".utf8).write(to: sourceHome.appendingPathComponent("AGENTS.md"))
+        try Data("same".utf8).write(to: destinationHome.appendingPathComponent("AGENTS.md"))
+        try Data("new source".utf8).write(to: sourceHome.appendingPathComponent("config.toml"))
+        try Data("old destination".utf8).write(to: destinationHome.appendingPathComponent("config.toml"))
+        try FileManager.default.createDirectory(at: sourceHome.appendingPathComponent("rules"), withIntermediateDirectories: true)
+        try Data("allow".utf8).write(to: sourceHome.appendingPathComponent("rules/allow.rules"))
+
+        let store = SettingsSharingStore(baseDirectory: root.appendingPathComponent("manager", isDirectory: true))
+        let source = ProfileStorageReference.isolated(directoryName: "source")
+        let destination = ProfileStorageReference.isolated(directoryName: "destination")
+        let diff = try store.diff(
+            source: source,
+            destination: destination,
+            items: [.instructions, .config, .rules, .override],
+            codexHomes: [source: sourceHome, destination: destinationHome]
+        )
+
+        XCTAssertEqual(diff.map(\.setting), [.instructions, .config, .rules, .override])
+        XCTAssertEqual(diff[0], SettingsCopyDiff(setting: .instructions, sourceExists: true, destinationExists: true, identical: true))
+        XCTAssertEqual(diff[1], SettingsCopyDiff(setting: .config, sourceExists: true, destinationExists: true, identical: false))
+        XCTAssertEqual(diff[2], SettingsCopyDiff(setting: .rules, sourceExists: true, destinationExists: false, identical: false))
+        XCTAssertEqual(diff[3], SettingsCopyDiff(setting: .override, sourceExists: false, destinationExists: false, identical: false))
+    }
+
+    func testSettingsCopyCanRestoreDestinationFromBackup() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sourceHome = root.appendingPathComponent("source", isDirectory: true)
+        let destinationHome = root.appendingPathComponent("destination", isDirectory: true)
+        try FileManager.default.createDirectory(at: sourceHome, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: destinationHome, withIntermediateDirectories: true)
+        try Data("source".utf8).write(to: sourceHome.appendingPathComponent("AGENTS.md"))
+        try Data("before".utf8).write(to: destinationHome.appendingPathComponent("AGENTS.md"))
+
+        let store = SettingsSharingStore(baseDirectory: root.appendingPathComponent("manager", isDirectory: true))
+        let source = ProfileStorageReference.isolated(directoryName: "source")
+        let destination = ProfileStorageReference.isolated(directoryName: "destination")
+        let summary = try store.copy(
+            source: source,
+            destination: destination,
+            items: [.instructions],
+            codexHomes: [source: sourceHome, destination: destinationHome]
+        )
+        XCTAssertEqual(try String(contentsOf: destinationHome.appendingPathComponent("AGENTS.md")), "source")
+
+        let restored = try store.restoreClone(
+            recordID: summary.operationID,
+            destination: destination,
+            codexHome: destinationHome
+        )
+        XCTAssertEqual(restored, [.instructions])
+        XCTAssertEqual(try String(contentsOf: destinationHome.appendingPathComponent("AGENTS.md")), "before")
+        XCTAssertNil(store.latestCloneRecord(destination: destination))
+    }
+
+    func testSettingsRegistryHealthDetectsCorruptionAndRestoresLatestBackup() throws {
+        let root = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let sourceHome = root.appendingPathComponent("source", isDirectory: true)
+        let destinationHome = root.appendingPathComponent("destination", isDirectory: true)
+        try FileManager.default.createDirectory(at: sourceHome, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: destinationHome, withIntermediateDirectories: true)
+        try Data("source".utf8).write(to: sourceHome.appendingPathComponent("AGENTS.md"))
+        let store = SettingsSharingStore(baseDirectory: root.appendingPathComponent("manager", isDirectory: true))
+        let source = ProfileStorageReference.isolated(directoryName: "source")
+        let destination = ProfileStorageReference.isolated(directoryName: "destination")
+
+        _ = try store.copy(
+            source: source,
+            destination: destination,
+            items: [.instructions],
+            codexHomes: [source: sourceHome, destination: destinationHome]
+        )
+        _ = try store.copy(
+            source: source,
+            destination: destination,
+            items: [.instructions],
+            codexHomes: [source: sourceHome, destination: destinationHome]
+        )
+        try Data("broken".utf8).write(to: store.registryURL, options: .atomic)
+
+        XCTAssertEqual(store.registryHealth(), SettingsRegistryHealth(state: .corrupted, backupAvailable: true))
+        let restored = try store.restoreRegistryFromBackup()
+        XCTAssertEqual(restored.cloneHistory.count, 1)
+        XCTAssertEqual(store.registryHealth().state, .healthy)
+    }
+
+    func testProfileRegistryHealthDetectsCorruptionAndRestoresLatestBackup() throws {
+        let (store, defaults, suiteName) = try makeStore()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let first = try store.addAccount(named: "最初", linkToExistingEnvironment: false)
+        _ = try store.addAccount(named: "次", linkToExistingEnvironment: false)
+        defaults.set(Data("not-json".utf8), forKey: "accountsV2")
+
+        XCTAssertEqual(store.registryHealth, ProfileRegistryHealth(state: .corrupted, backupAvailable: true))
+        let restored = try store.restoreAccountsFromBackup()
+        XCTAssertEqual(restored, [first])
+        XCTAssertEqual(store.registryHealth.state, .healthy)
+        XCTAssertEqual(store.accounts, [first])
+    }
+
     func testSettingsSharePersistsGroupAndLeaveKeepsCurrentContent() throws {
         let root = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -1290,10 +1429,22 @@ final class ChatGPTProfileManagerTests: XCTestCase {
                 codexHomes: [source: sourceHome, destination: destinationHome]
             )
         ) { error in
-            XCTAssertEqual(error as? SettingsSharingError, .configContainsSensitiveValues)
+            XCTAssertEqual(error as? SettingsSharingError, .configContainsSensitiveValues(SettingsSharingStore.unsupportedConfigItems(in: "api_key = \"secret\"\n")))
+            XCTAssertFalse(error.localizedDescription.contains("secret"))
         }
         XCTAssertEqual(try String(contentsOf: destinationHome.appendingPathComponent("config.toml")), "destination")
         XCTAssertTrue(store.loadRegistry().groups.isEmpty)
+    }
+
+    func testUnsupportedConfigItemsHideValuesAndDeduplicateSections() {
+        let items = SettingsSharingStore.unsupportedConfigItems(in: "model = \"allowed\"\nnotify = [\"private-command\"]\n[mcp_servers.private_server]\napi_key = \"secret\"\n[mcp_servers.second.env]\nPRIVATE_TOKEN = \"secret\"\n[projects.\"/private/path\"]\ntrust_level = \"trusted\"\n[\"private-custom-section\"]\n")
+        XCTAssertEqual(items.count, 4)
+        XCTAssertTrue(items[0].contains("notify"))
+        XCTAssertTrue(items[1].contains("mcp_servers"))
+        XCTAssertTrue(items[2].contains("projects"))
+        XCTAssertFalse(items.joined().contains("private"))
+        XCTAssertFalse(items.joined().contains("secret"))
+        XCTAssertTrue(SettingsSharingStore.unsupportedConfigItems(in: "# comment\nmodel = \"x\"\nservice_tier = \"fast\"\n").isEmpty)
     }
 
     private func makeStore() throws -> (ProfileStateStore, UserDefaults, String) {

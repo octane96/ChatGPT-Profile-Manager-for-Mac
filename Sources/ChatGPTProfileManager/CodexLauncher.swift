@@ -149,6 +149,52 @@ final class CodexLauncher {
         let authURL = homeDirectory
             .appendingPathComponent(".codex", isDirectory: true)
             .appendingPathComponent("auth.json", isDirectory: false)
+        return email(fromAuthURL: authURL)
+    }
+
+    /// Reads the account identity from the profile's local auth document.
+    /// The manager never writes this value to its own registry.
+    func email(for account: AccountProfile) -> String? {
+        guard let codexHome = codexHomeDirectory(for: account) else {
+            return nil
+        }
+        return email(fromAuthURL: codexHome.appendingPathComponent("auth.json", isDirectory: false))
+    }
+
+    func loginState(for account: AccountProfile) -> ProfileLoginState {
+        guard let codexHome = codexHomeDirectory(for: account) else {
+            return .unavailable
+        }
+        let authURL = codexHome.appendingPathComponent("auth.json", isDirectory: false)
+        guard fileManager.fileExists(atPath: authURL.path) else {
+            return .signedOut
+        }
+        guard let data = try? Data(contentsOf: authURL),
+              let document = try? JSONDecoder().decode(AuthDocument.self, from: data)
+        else {
+            return .unavailable
+        }
+        if let email = normalizedEmail(document.email)
+            ?? document.tokens.flatMap({ tokens in
+                [tokens.idToken, tokens.accessToken].compactMap { $0 }
+                    .compactMap { emailFromToken($0) }
+                    .first
+            }) {
+            return .signedIn(email: email)
+        }
+        return .signedOut
+    }
+
+    var profileRegistryHealth: ProfileRegistryHealth {
+        stateStore.registryHealth
+    }
+
+    @discardableResult
+    func restoreProfileRegistryFromBackup() throws -> [AccountProfile] {
+        try stateStore.restoreAccountsFromBackup()
+    }
+
+    private func email(fromAuthURL authURL: URL) -> String? {
         guard let data = try? Data(contentsOf: authURL),
               let document = try? JSONDecoder().decode(AuthDocument.self, from: data)
         else {
@@ -237,6 +283,10 @@ final class CodexLauncher {
 
     var isCodexRunning: Bool {
         !runningChatGPTApplications.isEmpty
+    }
+
+    var chatGPTApplicationURL: URL? {
+        locateCodexApp()
     }
 
     var runningAccountIDs: Set<UUID> {
@@ -574,6 +624,19 @@ final class CodexLauncher {
         return SettingsSharingStore(baseDirectory: baseDirectory).loadRegistry().groups
     }
 
+    func settingsRegistryHealth() -> SettingsRegistryHealth {
+        guard let baseDirectory = try? profileBaseDirectory() else {
+            return SettingsRegistryHealth(state: .corrupted, backupAvailable: false)
+        }
+        return SettingsSharingStore(baseDirectory: baseDirectory).registryHealth()
+    }
+
+    @discardableResult
+    func restoreSettingsRegistryFromBackup() throws -> SettingsRegistry {
+        let baseDirectory = try profileBaseDirectory()
+        return try SettingsSharingStore(baseDirectory: baseDirectory).restoreRegistryFromBackup()
+    }
+
     func profileLauncherURL(for account: AccountProfile) -> URL? {
         guard let baseDirectory = try? profileBaseDirectory() else {
             return nil
@@ -586,6 +649,14 @@ final class CodexLauncher {
             return false
         }
         return ProfileLauncherStore(baseDirectory: baseDirectory).hasLauncher(for: account)
+    }
+
+    func profileLauncherStatus(for account: AccountProfile) -> ProfileLauncherStatus {
+        guard account.id != stateStore.existingEnvironmentAccountID,
+              let baseDirectory = try? profileBaseDirectory() else {
+            return .notCreated
+        }
+        return ProfileLauncherStore(baseDirectory: baseDirectory).status(for: account)
     }
 
     @discardableResult
@@ -614,6 +685,51 @@ final class CodexLauncher {
             destination: settingsStorageReference(for: destinationAccount),
             items: items,
             codexHomes: homes
+        )
+    }
+
+    func previewSettingsCopy(
+        from sourceAccountID: UUID,
+        to destinationAccountID: UUID,
+        items: Set<ManagedSetting>
+    ) throws -> [SettingsCopyDiff] {
+        let sourceAccount = try account(for: sourceAccountID)
+        let destinationAccount = try account(for: destinationAccountID)
+        guard sourceAccount.id != destinationAccount.id else {
+            throw SettingsSharingError.sourceAndDestinationAreSame
+        }
+        let homes = try settingsHomes(for: [sourceAccount, destinationAccount])
+        let baseDirectory = try profileBaseDirectory()
+        return try SettingsSharingStore(baseDirectory: baseDirectory).diff(
+            source: settingsStorageReference(for: sourceAccount),
+            destination: settingsStorageReference(for: destinationAccount),
+            items: items,
+            codexHomes: homes
+        )
+    }
+
+    func latestSettingsCopy(for account: AccountProfile) -> SettingsCloneRecord? {
+        guard let baseDirectory = try? profileBaseDirectory() else { return nil }
+        return SettingsSharingStore(baseDirectory: baseDirectory)
+            .latestCloneRecord(destination: settingsStorageReference(for: account))
+    }
+
+    @discardableResult
+    func restoreLatestSettingsCopy(for accountID: UUID) throws -> [ManagedSetting] {
+        let account = try account(for: accountID)
+        try ensureSettingsProfilesClosed([account])
+        guard let codexHome = codexHomeDirectory(for: account) else {
+            throw SettingsSharingError.transactionFailed
+        }
+        guard let baseDirectory = try? profileBaseDirectory(),
+              let record = SettingsSharingStore(baseDirectory: baseDirectory)
+                .latestCloneRecord(destination: settingsStorageReference(for: account)) else {
+            throw SettingsSharingError.transactionFailed
+        }
+        return try SettingsSharingStore(baseDirectory: baseDirectory).restoreClone(
+            recordID: record.id,
+            destination: settingsStorageReference(for: account),
+            codexHome: codexHome
         )
     }
 

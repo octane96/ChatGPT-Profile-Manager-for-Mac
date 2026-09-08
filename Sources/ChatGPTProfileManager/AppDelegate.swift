@@ -1,4 +1,5 @@
 import AppKit
+import UserNotifications
 
 private struct DiagnosticsTaskError: LocalizedError, Sendable {
     let message: String
@@ -74,6 +75,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     private var window: NSWindow?
     private var guideWindow: NSWindow?
     private var settingsWindow: NSWindow?
+    private var groupsWindow: NSWindow?
     private var diagnosticsWindow: NSWindow?
     private var diagnosticsAccountID: UUID?
     private weak var diagnosticsTitleLabel: NSTextField?
@@ -113,9 +115,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     private var addButton: NSButton?
     private var revealButton: NSButton?
     private var settingsButton: NSButton?
+    private var usageRefreshButton: NSButton?
     private weak var settingsLanguagePopup: NSPopUpButton?
+    private weak var settingsUsageNotificationCheckbox: NSButton?
+    private weak var settingsProfileHealthLabel: NSTextField?
+    private weak var settingsSettingsHealthLabel: NSTextField?
+    private weak var settingsProfileRestoreButton: NSButton?
+    private weak var settingsSettingsRestoreButton: NSButton?
     private var storageChoiceButtons: [NSButton] = []
     private var usageByAccountID: [UUID: AccountUsageSnapshot] = [:]
+    private enum UsageFetchState: Equatable {
+        case loading
+        case loaded(Date)
+        case failed(Date?)
+    }
+    private var usageFetchStates: [UUID: UsageFetchState] = [:]
+    private var scheduledUsageNotificationIDs: Set<String> = []
+    private let usageNotificationsEnabledKey = "usageResetNotificationsEnabled"
+    private let scheduledUsageNotificationIDsKey = "scheduledUsageNotificationIDs"
     private var expandedResetCreditAccountIDs: Set<UUID> = []
     private let collapsedAccountRowHeight: CGFloat = 120
     private let expandedAccountRowHeight: CGFloat = 152
@@ -236,6 +253,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         if closingWindow === settingsWindow {
             settingsWindow = nil
             settingsLanguagePopup = nil
+            return
+        }
+
+        if closingWindow === groupsWindow {
+            groupsWindow = nil
             return
         }
 
@@ -550,13 +572,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             )
         )
 
+        let usageRefreshButton = NSButton(
+            title: L10n.text("usage.refresh", fallback: "利用状況を更新"),
+            target: self,
+            action: #selector(refreshUsageManually)
+        )
+        usageRefreshButton.bezelStyle = .rounded
+        usageRefreshButton.controlSize = .regular
+        usageRefreshButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 30).isActive = true
+        usageRefreshButton.contentTintColor = .controlAccentColor
+        usageRefreshButton.image = NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: nil)
+        usageRefreshButton.imagePosition = .imageLeading
+        usageRefreshButton.setAccessibilityLabel(
+            L10n.text("usage.refresh.accessibility-label", fallback: "プロファイルの利用状況を更新")
+        )
+
+        let groupsButton = NSButton(
+            title: L10n.text("management.shared-groups", fallback: "共有グループ"),
+            target: self,
+            action: #selector(showSettingsGroups)
+        )
+        groupsButton.bezelStyle = .rounded
+        groupsButton.controlSize = .regular
+        groupsButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 30).isActive = true
+        groupsButton.contentTintColor = .controlAccentColor
+        groupsButton.image = NSImage(systemSymbolName: "person.2", accessibilityDescription: nil)
+        groupsButton.imagePosition = .imageLeading
+        groupsButton.setAccessibilityLabel(
+            L10n.text("management.shared-groups.accessibility-label", fallback: "共有グループの一覧を表示")
+        )
+
         utilityButtons.addArrangedSubview(settingsButton)
         utilityButtons.addArrangedSubview(revealButton)
         utilityButtons.addArrangedSubview(guideButton)
+        utilityButtons.addArrangedSubview(usageRefreshButton)
+        utilityButtons.addArrangedSubview(groupsButton)
         mainStack.addArrangedSubview(utilityButtons)
 
         self.revealButton = revealButton
         self.settingsButton = settingsButton
+        self.usageRefreshButton = usageRefreshButton
 
         self.window = window
     }
@@ -570,8 +625,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         let accounts = launcher.accounts
         accountCountLabel?.stringValue = L10n.accountCount(accounts.count)
 
-        statusLabel?.stringValue = ""
-        statusLabel?.isHidden = true
+        let profileHealth = launcher.profileRegistryHealth
+        let settingsHealth = launcher.settingsRegistryHealth()
+        if profileHealth.state == .corrupted || settingsHealth.state == .corrupted {
+            statusLabel?.stringValue = L10n.text(
+                "management.health-warning",
+                fallback: "管理情報の一部を読み込めません。設定からバックアップを確認してください。"
+            )
+            statusLabel?.textColor = .systemOrange
+            statusLabel?.isHidden = false
+        } else {
+            statusLabel?.stringValue = ""
+            statusLabel?.textColor = .secondaryLabelColor
+            statusLabel?.isHidden = true
+        }
 
         tableView?.reloadData()
         updateTableHeight(accountCount: accounts.count)
@@ -595,8 +662,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
 
         guard !accountHomes.isEmpty else {
             usageByAccountID = [:]
+            usageFetchStates = [:]
+            scheduleUsageResetNotifications(for: [])
             return
         }
+
+        usageFetchStates = Dictionary(uniqueKeysWithValues: accountHomes.map { ($0.accountID, .loading) })
+        tableView?.reloadData()
 
         usageRefreshTask = Task { [weak self] in
             var snapshots: [UUID: AccountUsageSnapshot] = [:]
@@ -615,9 +687,99 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             }
 
             guard !Task.isCancelled else { return }
+            let finishedAt = Date()
             self?.usageByAccountID = snapshots
+            self?.usageFetchStates = Dictionary(uniqueKeysWithValues: accountHomes.map { accountID, _ in
+                (accountID, snapshots[accountID] == nil ? .failed(finishedAt) : .loaded(finishedAt))
+            })
+            self?.scheduleUsageResetNotifications(
+                for: accountHomes.compactMap { accountID, _ in
+                    guard let snapshot = snapshots[accountID],
+                          let account = self?.launcher.accounts.first(where: { $0.id == accountID }) else {
+                        return nil
+                    }
+                    return (account, snapshot)
+                }
+            )
             self?.tableView?.reloadData()
             self?.updateTableHeight(accountCount: self?.launcher.accounts.count ?? 0)
+        }
+    }
+
+    @objc
+    private func refreshUsageManually() {
+        refreshUsage()
+        showTransientStatus(
+            L10n.text("usage.refresh.started", fallback: "利用状況を更新しています…")
+        )
+    }
+
+    private var usageNotificationsEnabled: Bool {
+        guard UserDefaults.standard.object(forKey: usageNotificationsEnabledKey) != nil else {
+            // Notifications are opt-in so opening the manager never prompts
+            // for system permission unexpectedly.
+            return false
+        }
+        return UserDefaults.standard.bool(forKey: usageNotificationsEnabledKey)
+    }
+
+    private func scheduleUsageResetNotifications(
+        for entries: [(AccountProfile, AccountUsageSnapshot)]
+    ) {
+        let center = UNUserNotificationCenter.current()
+        let persistedIDs = Set(UserDefaults.standard.stringArray(forKey: scheduledUsageNotificationIDsKey) ?? [])
+        let oldIDs = Array(scheduledUsageNotificationIDs.union(persistedIDs))
+        scheduledUsageNotificationIDs.removeAll()
+        UserDefaults.standard.removeObject(forKey: scheduledUsageNotificationIDsKey)
+        if !oldIDs.isEmpty {
+            center.removePendingNotificationRequests(withIdentifiers: oldIDs)
+        }
+        guard usageNotificationsEnabled else { return }
+
+        let now = Date()
+        var requests: [UNNotificationRequest] = []
+        for (account, snapshot) in entries {
+            let windows: [(String, String, UsageWindow?)] = [
+                ("primary", "5H", snapshot.primary),
+                ("secondary", L10n.text("usage.weekly", fallback: "週間"), snapshot.secondary)
+            ]
+            for (kindKey, kind, window) in windows {
+                guard let resetDate = window?.resetsAt, resetDate > now.addingTimeInterval(30) else { continue }
+                let identifier = "usage-reset-\(account.id.uuidString)-\(kindKey)"
+                let content = UNMutableNotificationContent()
+                content.title = L10n.text("usage.notification.title", fallback: "利用上限がリセットされました")
+                content.body = L10n.text(
+                    "usage.notification.body",
+                    fallback: "{name}の{kind}枠がリセットされました。",
+                    replacing: ["name": account.name, "kind": kind]
+                )
+                content.sound = .default
+                let components = Calendar.current.dateComponents(
+                    [.year, .month, .day, .hour, .minute, .second],
+                    from: resetDate
+                )
+                requests.append(
+                    UNNotificationRequest(
+                        identifier: identifier,
+                        content: content,
+                        trigger: UNCalendarNotificationTrigger(dateMatching: components, repeats: false)
+                    )
+                )
+                scheduledUsageNotificationIDs.insert(identifier)
+            }
+        }
+        UserDefaults.standard.set(
+            scheduledUsageNotificationIDs.sorted(),
+            forKey: scheduledUsageNotificationIDsKey
+        )
+        guard !requests.isEmpty else { return }
+
+        Task { @MainActor in
+            let granted = (try? await center.requestAuthorization(options: [.alert, .sound])) ?? false
+            guard granted else { return }
+            for request in requests {
+                try? await center.add(request)
+            }
         }
     }
 
@@ -647,6 +809,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         tableView?.isEnabled = !isLaunching
         revealButton?.isEnabled = !isLaunching
         settingsButton?.isEnabled = !isLaunching
+        usageRefreshButton?.isEnabled = !isLaunching
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int {
@@ -881,6 +1044,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         )
         metadataStack.addArrangedSubview(badge)
 
+        if !isExisting,
+           launcher.profileLauncherStatus(for: account) == .needsUpdate {
+            metadataStack.addArrangedSubview(
+                ProfileBadgeView(
+                    text: L10n.text("launcher.needs-update-badge", fallback: "ランチャー更新が必要"),
+                    color: .systemOrange
+                )
+            )
+        }
+
         if let binding = launcher.settingsBinding(for: account),
            let group = launcher.settingsGroups().first(where: { $0.id == binding.groupID }) {
             metadataStack.addArrangedSubview(
@@ -913,11 +1086,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             )
         }
 
+        let usageState = usageFetchStates[account.id]
+        let planName = usageSnapshot?.displayPlanName ?? "—"
+        let planSuffix: String
+        switch usageState {
+        case .some(.loading):
+            planSuffix = L10n.text("usage.fetching", fallback: "（取得中）")
+        case .some(.failed):
+            planSuffix = L10n.text("usage.fetch-failed", fallback: "（取得失敗）")
+        default:
+            planSuffix = ""
+        }
         let planLabel = NSTextField(
             labelWithString: L10n.text(
                 "usage.plan",
-                fallback: "プラン: {plan}",
-                replacing: ["plan": usageSnapshot?.displayPlanName ?? "—"]
+                fallback: "プラン: {plan}{suffix}",
+                replacing: ["plan": planName, "suffix": planSuffix]
             )
         )
         planLabel.font = .systemFont(ofSize: 11, weight: .medium)
@@ -925,7 +1109,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             ? .tertiaryLabelColor
             : .secondaryLabelColor
         planLabel.setContentHuggingPriority(.required, for: .horizontal)
+        switch usageState {
+        case let .some(.loaded(updatedAt)):
+            planLabel.toolTip = L10n.text(
+                "usage.last-updated",
+                fallback: "利用状況の最終確認: {date}",
+                replacing: ["date": formatFetchDate(updatedAt)]
+            )
+        case let .some(.failed(updatedAt)):
+            planLabel.toolTip = L10n.text(
+                "usage.fetch-failed-tooltip",
+                fallback: "利用状況の取得に失敗しました。{date}",
+                replacing: [
+                    "date": updatedAt.map { "（最終確認: \(formatFetchDate($0))）" } ?? ""
+                ]
+            )
+        case .some(.loading), .none:
+            planLabel.toolTip = L10n.text(
+                "usage.fetch-status-tooltip",
+                fallback: "利用状況を確認しています。"
+            )
+        }
         metadataStack.addArrangedSubview(planLabel)
+
+        let loginState = launcher.loginState(for: account)
+        let loginText: String
+        let loginColor: NSColor
+        switch loginState {
+        case let .signedIn(email):
+            loginText = L10n.text(
+                "profile.login.signed-in",
+                fallback: "ログイン: {email}",
+                replacing: ["email": email]
+            )
+            loginColor = .secondaryLabelColor
+        case .signedOut:
+            loginText = L10n.text("profile.login.signed-out", fallback: "未ログイン")
+            loginColor = .systemOrange
+        case .unavailable:
+            loginText = L10n.text("profile.login.unavailable", fallback: "ログイン情報を確認できません")
+            loginColor = .tertiaryLabelColor
+        }
+        let loginLabel = NSTextField(labelWithString: loginText)
+        loginLabel.font = .systemFont(ofSize: 10, weight: .regular)
+        loginLabel.textColor = loginColor
+        loginLabel.lineBreakMode = .byTruncatingMiddle
+        loginLabel.maximumNumberOfLines = 1
+        loginLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        loginLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        loginLabel.toolTip = loginText
+        metadataStack.addArrangedSubview(loginLabel)
 
         labels.addArrangedSubview(metadataStack)
 
@@ -1339,6 +1572,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         return formatter.string(from: date)
     }
 
+    private func formatFetchDate(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = L10n.language.locale
+        formatter.dateFormat = L10n.language == .japanese ? "M月d日 HH:mm" : "MMM d, HH:mm"
+        return formatter.string(from: date)
+    }
+
     func tableView(
         _ tableView: NSTableView,
         pasteboardWriterForRow row: Int
@@ -1514,6 +1754,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             action: #selector(copySettingsFromMenu(_:)),
             enabled: launcher.accounts.count > 1 && !isLaunching
         )
+        if launcher.latestSettingsCopy(for: account) != nil {
+            addItem(
+                L10n.text("settings-sharing.restore-last-copy", fallback: "最後の設定コピーを復元…"),
+                action: #selector(restoreSettingsCopyFromMenu(_:)),
+                enabled: !isLaunching && !isRunning
+            )
+        }
 
         if !isExisting {
             menu.addItem(.separator())
@@ -1587,6 +1834,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     }
 
     @objc
+    private func restoreSettingsCopyFromMenu(_ sender: NSMenuItem) {
+        guard let accountID = accountID(from: sender),
+              let destination = launcher.accounts.first(where: { $0.id == accountID }) else {
+            presentError(ProfileManagerError.accountNotFound)
+            return
+        }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = L10n.text("settings-sharing.restore-title", fallback: "最後の設定コピーを復元")
+        alert.informativeText = L10n.text(
+            "settings-sharing.restore-message",
+            fallback: "「{name}」の設定を、直前のコピー前の状態へ戻します。ChatGPTを終了している必要があります。",
+            replacing: ["name": destination.name]
+        )
+        alert.addButton(withTitle: L10n.text("settings-sharing.restore", fallback: "復元"))
+        alert.addButton(withTitle: L10n.text("common.cancel", fallback: "キャンセル"))
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        do {
+            let restored = try launcher.restoreLatestSettingsCopy(for: accountID)
+            refreshUI()
+            showTransientStatus(
+                L10n.text(
+                    "settings-sharing.restored",
+                    fallback: "{count}項目をコピー前の状態へ復元しました。",
+                    replacing: ["count": "\(restored.count)"]
+                )
+            )
+        } catch {
+            presentError(error, title: L10n.text("settings-sharing.restore-failed", fallback: "設定を復元できませんでした"))
+        }
+    }
+
+    @objc
     private func diagnoseProfileFromMenu(_ sender: NSMenuItem) {
         guard let accountID = accountID(from: sender) else {
             presentError(ProfileManagerError.accountNotFound)
@@ -1607,10 +1887,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         guard !isLaunching else { return }
         if launcher.isAccountRunning(id: account.id) {
             if !launcher.activate(accountID: account.id) {
-                showTransientStatus(
+                presentWarning(
                     L10n.text(
                         "account.focus.unavailable",
                         fallback: "起動中のChatGPTを前面に表示できませんでした。"
+                    ),
+                    title: L10n.text(
+                        "account.focus.error-title",
+                        fallback: "ChatGPTを開けませんでした"
                     )
                 )
             }
@@ -1636,13 +1920,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             return
         }
 
-        let groupNameField = NSTextField(string: "\(sourceAccount.name) 共有")
+        let groupNameField = NSTextField(string: L10n.text("settings-sharing.default-name", fallback: "{name}の共有設定", replacing: ["name": sourceAccount.name]))
         groupNameField.placeholderString = L10n.text(
             "settings-sharing.group-placeholder",
             fallback: "共有グループ名"
         )
         groupNameField.translatesAutoresizingMaskIntoConstraints = false
-        groupNameField.widthAnchor.constraint(equalToConstant: 420).isActive = true
+        groupNameField.widthAnchor.constraint(equalToConstant: 460).isActive = true
 
         let destinationStack = NSStackView()
         destinationStack.orientation = .vertical
@@ -1667,47 +1951,87 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         let accessory = NSStackView()
         accessory.orientation = .vertical
         accessory.alignment = .leading
-        accessory.spacing = 10
-        accessory.addArrangedSubview(
-            NSTextField(labelWithString: L10n.text("settings-sharing.group-name", fallback: "共有グループ名"))
-        )
-        accessory.addArrangedSubview(groupNameField)
-        accessory.addArrangedSubview(
-            NSTextField(labelWithString: L10n.text("settings-sharing.source-profile", fallback: "作成元プロファイル"))
-        )
+        accessory.spacing = 16
+        func section(_ title: String, content: NSView, detail: String? = nil) {
+            let stack = NSStackView()
+            stack.orientation = .vertical
+            stack.alignment = .leading
+            stack.spacing = 6
+            let heading = NSTextField(labelWithString: title)
+            heading.font = .systemFont(ofSize: 12, weight: .semibold)
+            stack.addArrangedSubview(heading)
+            stack.addArrangedSubview(content)
+            if let detail {
+                let note = NSTextField(wrappingLabelWithString: detail)
+                note.font = .systemFont(ofSize: 11)
+                note.textColor = .secondaryLabelColor
+                stack.addArrangedSubview(note)
+                note.widthAnchor.constraint(equalToConstant: 460).isActive = true
+            }
+            accessory.addArrangedSubview(stack)
+        }
+        let heading = NSTextField(labelWithString: L10n.text("settings-sharing.form-title", fallback: "プロファイル間で設定を共有"))
+        heading.font = .systemFont(ofSize: 20, weight: .bold)
+        accessory.addArrangedSubview(heading)
+        let explanation = NSTextField(wrappingLabelWithString: L10n.text("settings-sharing.form-description", fallback: "選んだ設定を複数のプロファイルで共通に使います。共有後は、設定を変更すると参加プロファイルすべてに反映されます。"))
+        explanation.font = .systemFont(ofSize: 12)
+        explanation.textColor = .secondaryLabelColor
+        accessory.addArrangedSubview(explanation)
+        explanation.widthAnchor.constraint(equalToConstant: 460).isActive = true
         let sourceLabel = NSTextField(labelWithString: sourceAccount.name)
-        sourceLabel.font = .systemFont(ofSize: 13, weight: .semibold)
-        accessory.addArrangedSubview(sourceLabel)
-        accessory.addArrangedSubview(
-            NSTextField(labelWithString: L10n.text("settings-sharing.members", fallback: "追加で参加するプロファイル"))
-        )
-        accessory.addArrangedSubview(destinationStack)
-        accessory.addArrangedSubview(
-            NSTextField(labelWithString: L10n.text("settings-sharing.items", fallback: "共有する設定"))
-        )
-        accessory.addArrangedSubview(itemStack.view)
-        accessory.setFrameSize(NSSize(width: 430, height: accessory.fittingSize.height))
+        sourceLabel.font = .systemFont(ofSize: 14, weight: .semibold)
+        section(L10n.text("settings-sharing.initial-source", fallback: "共有の元にする設定"), content: sourceLabel,
+                detail: L10n.text("settings-sharing.initial-source-note", fallback: "このプロファイルの設定から共有を始めます。このプロファイル自身も共有に参加します。"))
+        section(L10n.text("settings-sharing.choose-peers", fallback: "一緒に使うプロファイル（1つ以上）"), content: destinationStack,
+                detail: L10n.text("settings-sharing.replace-note", fallback: "選んだ相手の設定はバックアップしてから、共有元の内容に置き換えます。"))
+        section(L10n.text("settings-sharing.choose-items", fallback: "共通にする設定（1つ以上）"), content: itemStack.view)
+        section(L10n.text("settings-sharing.group-name", fallback: "共有グループ名"), content: groupNameField)
+        let notice = NSTextField(wrappingLabelWithString: L10n.text("settings-sharing.before-create", fallback: "作成前に、参加するすべてのプロファイルのChatGPTを終了してください。ログイン情報・チャット・プロジェクトは共有しません。"))
+        notice.font = .systemFont(ofSize: 11)
+        notice.textColor = .secondaryLabelColor
+        accessory.addArrangedSubview(notice)
+        notice.widthAnchor.constraint(equalToConstant: 460).isActive = true
 
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = L10n.text(
-            "settings-sharing.create-title",
-            fallback: "設定共有を作成"
-        )
-        alert.informativeText = L10n.text(
-            "settings-sharing.create-message",
-            fallback: "共有設定はアプリ管理下の共通ファイルになります。参加するすべてのChatGPTを終了してから適用します。"
-        )
-        alert.addButton(
-            withTitle: L10n.text("settings-sharing.create", fallback: "共有を作成")
-        )
-        alert.addButton(
-            withTitle: L10n.text("settings-sharing.join-existing", fallback: "既存の共有へ参加…")
-        )
-        alert.addButton(withTitle: L10n.text("common.cancel", fallback: "キャンセル"))
-        alert.accessoryView = accessory
+        let joinButton = NSButton(title: L10n.text("settings-sharing.use-existing-group", fallback: "既存の共有グループに参加…"), target: self, action: #selector(finishShareDialog(_:)))
+        joinButton.tag = NSApplication.ModalResponse.alertSecondButtonReturn.rawValue
+        joinButton.bezelStyle = .rounded
+        joinButton.isEnabled = launcher.settingsGroups().contains { !$0.members.contains(launcher.settingsStorageReference(for: sourceAccount)) }
+        section(L10n.text("settings-sharing.existing-group-heading", fallback: "すでに共有グループがある場合"), content: joinButton)
 
-        switch alert.runModal() {
+        let footer = NSStackView()
+        footer.orientation = .horizontal
+        footer.spacing = 8
+        footer.addArrangedSubview(NSView())
+        let cancel = NSButton(title: L10n.text("common.cancel", fallback: "キャンセル"), target: self, action: #selector(finishShareDialog(_:)))
+        cancel.tag = NSApplication.ModalResponse.cancel.rawValue
+        cancel.bezelStyle = .rounded
+        cancel.keyEquivalent = "\u{1b}"
+        let create = NSButton(title: L10n.text("settings-sharing.create-group", fallback: "共有グループを作成"), target: self, action: #selector(finishShareDialog(_:)))
+        create.tag = NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
+        create.bezelStyle = .rounded
+        create.keyEquivalent = "\r"
+        footer.addArrangedSubview(cancel)
+        footer.addArrangedSubview(create)
+        accessory.addArrangedSubview(footer)
+        footer.widthAnchor.constraint(equalToConstant: 460).isActive = true
+        accessory.translatesAutoresizingMaskIntoConstraints = false
+        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 508, height: accessory.fittingSize.height + 48), styleMask: [.titled], backing: .buffered, defer: false)
+        panel.title = L10n.text("settings-sharing.form-title", fallback: "プロファイル間で設定を共有")
+        panel.isReleasedWhenClosed = false
+        let content = panel.contentView!
+        content.addSubview(accessory)
+        NSLayoutConstraint.activate([
+            accessory.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 24),
+            accessory.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24),
+            accessory.topAnchor.constraint(equalTo: content.topAnchor, constant: 24),
+            accessory.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -24)
+        ])
+        panel.center()
+        panel.initialFirstResponder = groupNameField
+        defer { panel.orderOut(nil) }
+        while true {
+        panel.makeKeyAndOrderFront(nil)
+        switch NSApp.runModal(for: panel) {
         case .alertFirstButtonReturn:
             let selectedDestinations = destinations.filter {
                 destinationButtons[$0.id]?.state == .on
@@ -1718,13 +2042,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                 }
             )
             guard !selectedDestinations.isEmpty, !selectedItems.isEmpty else {
-                showTransientStatus(
+                presentWarning(
                     L10n.text(
                         "settings-sharing.selection-required",
                         fallback: "共有先と共有項目を1つ以上選択してください。"
+                    ),
+                    title: L10n.text(
+                        "settings-sharing.selection-required-title",
+                        fallback: "選択が必要です"
                     )
                 )
-                return
+                continue
             }
             do {
                 let group = try launcher.createSettingsShare(
@@ -1741,6 +2069,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                         replacing: ["name": group.name]
                     )
                 )
+                return
             } catch {
                 presentError(
                     error,
@@ -1751,10 +2080,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                 )
             }
         case .alertSecondButtonReturn:
+            panel.orderOut(nil)
             presentJoinSettingsShare(accountID: sourceAccountID)
+            return
         default:
-            break
+            return
         }
+        }
+    }
+
+    @objc private func finishShareDialog(_ sender: NSButton) {
+        NSApp.stopModal(withCode: NSApplication.ModalResponse(rawValue: sender.tag))
     }
 
     private func presentJoinSettingsShare(accountID: UUID) {
@@ -1842,32 +2178,95 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         let accessory = NSStackView()
         accessory.orientation = .vertical
         accessory.alignment = .leading
-        accessory.spacing = 10
-        accessory.addArrangedSubview(
-            NSTextField(labelWithString: L10n.text("settings-sharing.source", fallback: "コピー元"))
-        )
-        accessory.addArrangedSubview(popup)
-        accessory.addArrangedSubview(
-            NSTextField(labelWithString: L10n.text("settings-sharing.items", fallback: "コピーする設定"))
-        )
-        accessory.addArrangedSubview(itemStack.view)
-        accessory.setFrameSize(NSSize(width: 430, height: accessory.fittingSize.height))
+        accessory.spacing = 18
+        func label(_ text: String, heading: Bool = false) -> NSTextField {
+            let field = NSTextField(wrappingLabelWithString: text)
+            field.font = .systemFont(ofSize: heading ? 12 : 11, weight: heading ? .semibold : .regular)
+            field.textColor = heading ? .labelColor : .secondaryLabelColor
+            return field
+        }
+        let title = NSTextField(labelWithString: L10n.text("settings-copy.form-title", fallback: "プロファイルの設定をコピー"))
+        title.font = .systemFont(ofSize: 20, weight: .bold)
+        accessory.addArrangedSubview(title)
+        let intro = label(L10n.text("settings-copy.description", fallback: "別のプロファイルの設定を、選んだ項目だけ取り込みます。コピー後はそれぞれ独立して変更できます。"))
+        accessory.addArrangedSubview(intro)
+        intro.widthAnchor.constraint(equalToConstant: 460).isActive = true
 
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = L10n.text(
-            "settings-sharing.copy-title",
-            fallback: "別のプロファイルから設定をコピー"
-        )
-        alert.informativeText = L10n.text(
-            "settings-sharing.copy-message",
-            fallback: "コピー先「{name}」の同名設定はバックアップして置き換えます。auth.json、セッション、チャット、プロジェクトはコピーしません。config.tomlを選ぶ場合は内容を確認してください。",
-            replacing: ["name": destination.name]
-        )
-        alert.accessoryView = accessory
-        alert.addButton(withTitle: L10n.text("settings-sharing.copy-confirm", fallback: "コピー"))
-        alert.addButton(withTitle: L10n.text("common.cancel", fallback: "キャンセル"))
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let sourceColumn = NSStackView(views: [label(L10n.text("settings-sharing.source", fallback: "コピー元"), heading: true), popup])
+        sourceColumn.orientation = .vertical
+        sourceColumn.alignment = .leading
+        sourceColumn.spacing = 8
+        popup.widthAnchor.constraint(equalToConstant: 208).isActive = true
+        let destinationName = NSTextField(labelWithString: destination.name)
+        destinationName.font = .systemFont(ofSize: 14, weight: .semibold)
+        destinationName.lineBreakMode = .byTruncatingMiddle
+        destinationName.toolTip = destination.name
+        destinationName.widthAnchor.constraint(equalToConstant: 208).isActive = true
+        let destinationColumn = NSStackView(views: [label(L10n.text("settings-copy.destination", fallback: "コピー先（このプロファイル）"), heading: true), destinationName])
+        destinationColumn.orientation = .vertical
+        destinationColumn.alignment = .leading
+        destinationColumn.spacing = 8
+        let arrow = NSTextField(labelWithString: "→")
+        arrow.font = .systemFont(ofSize: 18)
+        arrow.textColor = .secondaryLabelColor
+        let direction = NSStackView(views: [sourceColumn, arrow, destinationColumn])
+        direction.orientation = .horizontal
+        direction.alignment = .centerY
+        direction.spacing = 12
+        accessory.addArrangedSubview(direction)
+
+        let items = NSStackView(views: [label(L10n.text("settings-copy.items", fallback: "コピーする設定（1つ以上）"), heading: true), itemStack.view])
+        items.orientation = .vertical
+        items.alignment = .leading
+        items.spacing = 8
+        accessory.addArrangedSubview(items)
+        let notes = NSStackView()
+        notes.orientation = .vertical
+        notes.alignment = .leading
+        notes.spacing = 6
+        for text in [
+            L10n.text("settings-copy.backup", fallback: "コピー先の同名設定は、バックアップしてから置き換えます。"),
+            L10n.text("settings-copy.excluded", fallback: "ログイン情報・セッション・チャット・プロジェクトはコピーしません。"),
+            L10n.text("settings-copy.config-note", fallback: "config.tomlをコピーする場合は、コピー後に内容を確認してください。")
+        ] {
+            let note = label(text)
+            notes.addArrangedSubview(note)
+            note.widthAnchor.constraint(equalToConstant: 460).isActive = true
+        }
+        accessory.addArrangedSubview(notes)
+        let footer = NSStackView()
+        footer.orientation = .horizontal
+        footer.spacing = 8
+        footer.addArrangedSubview(NSView())
+        let cancel = NSButton(title: L10n.text("common.cancel", fallback: "キャンセル"), target: self, action: #selector(finishShareDialog(_:)))
+        cancel.bezelStyle = .rounded
+        cancel.tag = NSApplication.ModalResponse.cancel.rawValue
+        cancel.keyEquivalent = "\u{1b}"
+        let next = NSButton(title: L10n.text("settings-copy.preview", fallback: "差分を確認"), target: self, action: #selector(finishShareDialog(_:)))
+        next.bezelStyle = .rounded
+        next.tag = NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
+        next.keyEquivalent = "\r"
+        footer.addArrangedSubview(cancel)
+        footer.addArrangedSubview(next)
+        accessory.addArrangedSubview(footer)
+        footer.widthAnchor.constraint(equalToConstant: 460).isActive = true
+        accessory.translatesAutoresizingMaskIntoConstraints = false
+        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 508, height: accessory.fittingSize.height + 48), styleMask: [.titled], backing: .buffered, defer: false)
+        panel.title = title.stringValue
+        panel.isReleasedWhenClosed = false
+        let content = panel.contentView!
+        content.addSubview(accessory)
+        NSLayoutConstraint.activate([
+            accessory.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 24),
+            accessory.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24),
+            accessory.topAnchor.constraint(equalTo: content.topAnchor, constant: 24),
+            accessory.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -24)
+        ])
+        panel.center()
+        defer { panel.orderOut(nil) }
+        while true {
+        panel.makeKeyAndOrderFront(nil)
+        guard NSApp.runModal(for: panel) == .alertFirstButtonReturn else { return }
 
         let selectedItems = Set(
             itemStack.buttons.compactMap { setting, button in
@@ -1875,10 +2274,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             }
         )
         guard !selectedItems.isEmpty else {
-            showTransientStatus(
+            presentWarning(
                 L10n.text(
-                    "settings-sharing.selection-required",
+                    "settings-copy.selection-required",
                     fallback: "コピーする設定を1つ以上選択してください。"
+                ),
+                title: L10n.text(
+                    "settings-sharing.selection-required-title",
+                    fallback: "選択が必要です"
+                )
+            )
+            continue
+        }
+
+        let source = sources[popup.indexOfSelectedItem]
+        do {
+            let diff = try launcher.previewSettingsCopy(
+                from: source.id,
+                to: destinationAccountID,
+                items: selectedItems
+            )
+            panel.orderOut(nil)
+            guard presentCopyDiffPreview(
+                source: source,
+                destination: destination,
+                diff: diff
+            ) else { continue }
+        } catch {
+            presentError(
+                error,
+                title: L10n.text(
+                    "settings-sharing.diff-error-title",
+                    fallback: "設定の差分を確認できませんでした"
                 )
             )
             return
@@ -1886,7 +2313,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
 
         do {
             let summary = try launcher.copySettings(
-                from: sources[popup.indexOfSelectedItem].id,
+                from: source.id,
                 to: destinationAccountID,
                 items: selectedItems
             )
@@ -1909,6 +2336,62 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                 )
             )
         }
+        return
+        }
+    }
+
+    private func presentCopyDiffPreview(
+        source: AccountProfile,
+        destination: AccountProfile,
+        diff: [SettingsCopyDiff]
+    ) -> Bool {
+        let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: 440, height: 130))
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.drawsBackground = false
+        textView.font = .systemFont(ofSize: 12)
+        textView.textContainerInset = NSSize(width: 4, height: 6)
+        let lines = diff.map { entry -> String in
+            let status: String
+            if !entry.sourceExists {
+                status = L10n.text("settings-sharing.diff.source-missing", fallback: "コピー元にありません")
+            } else if !entry.destinationExists {
+                status = L10n.text("settings-sharing.diff.new", fallback: "新規追加")
+            } else if entry.identical {
+                status = L10n.text("settings-sharing.diff.same", fallback: "変更なし")
+            } else {
+                status = L10n.text("settings-sharing.diff.changed", fallback: "変更あり")
+            }
+            return "\(entry.setting.displayName): \(status)"
+        }
+        textView.string = lines.joined(separator: "\n")
+        let accessory = NSStackView()
+        accessory.orientation = .vertical
+        accessory.alignment = .leading
+        accessory.spacing = 8
+        accessory.addArrangedSubview(
+            NSTextField(
+                wrappingLabelWithString: L10n.text(
+                    "settings-sharing.diff.message",
+                    fallback: "コピー元「{source}」からコピー先「{destination}」へ反映される差分です。内容そのものは表示しません。",
+                    replacing: ["source": source.name, "destination": destination.name]
+                )
+            )
+        )
+        accessory.addArrangedSubview(textView)
+        accessory.setFrameSize(NSSize(width: 450, height: accessory.fittingSize.height))
+
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = L10n.text("settings-sharing.diff-title", fallback: "設定コピー前の差分")
+        alert.informativeText = L10n.text(
+            "settings-sharing.diff-backup-note",
+            fallback: "実行するとコピー先の既存設定はバックアップされます。"
+        )
+        alert.accessoryView = accessory
+        alert.addButton(withTitle: L10n.text("settings-sharing.copy-confirm", fallback: "コピー"))
+        alert.addButton(withTitle: L10n.text("common.cancel", fallback: "キャンセル"))
+        return alert.runModal() == .alertFirstButtonReturn
     }
 
     private func leaveSettingsShare(accountID: UUID) {
@@ -2111,7 +2594,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         }
 
         let settingsWindow = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 560, height: 320),
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: 520),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -2282,6 +2765,96 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         rootStack.addArrangedSubview(languageCard)
         languageCard.widthAnchor.constraint(equalTo: rootStack.widthAnchor).isActive = true
 
+        let notificationsCard = ProfileCardView()
+        notificationsCard.translatesAutoresizingMaskIntoConstraints = false
+        let notificationsStack = NSStackView()
+        notificationsStack.orientation = .vertical
+        notificationsStack.alignment = .leading
+        notificationsStack.spacing = 8
+        notificationsStack.translatesAutoresizingMaskIntoConstraints = false
+        notificationsCard.addSubview(notificationsStack)
+        NSLayoutConstraint.activate([
+            notificationsStack.leadingAnchor.constraint(equalTo: notificationsCard.leadingAnchor, constant: 16),
+            notificationsStack.trailingAnchor.constraint(equalTo: notificationsCard.trailingAnchor, constant: -16),
+            notificationsStack.topAnchor.constraint(equalTo: notificationsCard.topAnchor, constant: 14),
+            notificationsStack.bottomAnchor.constraint(equalTo: notificationsCard.bottomAnchor, constant: -14)
+        ])
+        let notificationsCheckbox = NSButton(
+            checkboxWithTitle: L10n.text(
+                "settings.notifications.title",
+                fallback: "利用上限リセットを通知"
+            ),
+            target: nil,
+            action: nil
+        )
+        notificationsCheckbox.state = usageNotificationsEnabled ? .on : .off
+        notificationsCheckbox.setAccessibilityLabel(
+            L10n.text(
+                "settings.notifications.accessibility-label",
+                fallback: "利用上限リセット通知を有効にする"
+            )
+        )
+        notificationsStack.addArrangedSubview(notificationsCheckbox)
+        let notificationsDescription = NSTextField(
+            wrappingLabelWithString: L10n.text(
+                "settings.notifications.description",
+                fallback: "5H・週間の利用枠がリセットされる時刻にmacOS通知を表示します。初回保存時に通知の許可を求めます。"
+            )
+        )
+        notificationsDescription.font = .systemFont(ofSize: 12)
+        notificationsDescription.textColor = .secondaryLabelColor
+        notificationsDescription.maximumNumberOfLines = 3
+        notificationsStack.addArrangedSubview(notificationsDescription)
+        notificationsDescription.widthAnchor.constraint(equalTo: notificationsStack.widthAnchor).isActive = true
+        rootStack.addArrangedSubview(notificationsCard)
+        notificationsCard.widthAnchor.constraint(equalTo: rootStack.widthAnchor).isActive = true
+
+        let healthCard = ProfileCardView()
+        healthCard.translatesAutoresizingMaskIntoConstraints = false
+        let healthStack = NSStackView()
+        healthStack.orientation = .vertical
+        healthStack.alignment = .leading
+        healthStack.spacing = 8
+        healthStack.translatesAutoresizingMaskIntoConstraints = false
+        healthCard.addSubview(healthStack)
+        NSLayoutConstraint.activate([
+            healthStack.leadingAnchor.constraint(equalTo: healthCard.leadingAnchor, constant: 16),
+            healthStack.trailingAnchor.constraint(equalTo: healthCard.trailingAnchor, constant: -16),
+            healthStack.topAnchor.constraint(equalTo: healthCard.topAnchor, constant: 14),
+            healthStack.bottomAnchor.constraint(equalTo: healthCard.bottomAnchor, constant: -14)
+        ])
+        let healthTitle = NSTextField(
+            labelWithString: L10n.text("settings.health.title", fallback: "管理情報の状態")
+        )
+        healthTitle.font = .systemFont(ofSize: 13, weight: .semibold)
+        healthStack.addArrangedSubview(healthTitle)
+        let profileHealthRow = makeRegistryHealthRow(
+            title: L10n.text("settings.health.profiles", fallback: "プロファイル一覧"),
+            health: launcher.profileRegistryHealth,
+            action: #selector(restoreProfileRegistryFromSettings(_:))
+        )
+        let settingsHealthRow = makeSettingsHealthRow(
+            title: L10n.text("settings.health.settings", fallback: "共有グループの管理情報"),
+            health: launcher.settingsRegistryHealth(),
+            action: #selector(restoreSettingsRegistryFromSettings(_:))
+        )
+        healthStack.addArrangedSubview(profileHealthRow.stack)
+        healthStack.addArrangedSubview(settingsHealthRow.stack)
+        healthStack.addArrangedSubview(
+            makeDependencyHealthRow(
+                title: L10n.text("settings.health.chatgpt", fallback: "ChatGPT.app"),
+                available: launcher.chatGPTApplicationURL != nil
+            )
+        )
+        healthStack.addArrangedSubview(
+            makeDependencyHealthRow(
+                title: L10n.text("settings.health.codex", fallback: "Codexコマンド"),
+                available: UsageService.codexExecutableURLForDiagnostics() != nil
+            )
+        )
+        rootStack.addArrangedSubview(healthCard)
+        healthCard.widthAnchor.constraint(equalTo: rootStack.widthAnchor).isActive = true
+
         let footerStack = NSStackView()
         footerStack.orientation = .horizontal
         footerStack.alignment = .centerY
@@ -2311,8 +2884,315 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
 
         self.settingsWindow = settingsWindow
         settingsLanguagePopup = languagePopup
+        settingsUsageNotificationCheckbox = notificationsCheckbox
+        settingsProfileHealthLabel = profileHealthRow.label
+        settingsProfileRestoreButton = profileHealthRow.button
+        settingsSettingsHealthLabel = settingsHealthRow.label
+        settingsSettingsRestoreButton = settingsHealthRow.button
         settingsWindow.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @objc
+    private func showSettingsGroups() {
+        if let groupsWindow, groupsWindow.isVisible {
+            groupsWindow.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        let groupsWindow = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 600, height: 460),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        groupsWindow.title = L10n.text("settings.groups.window-title", fallback: "共有グループ")
+        groupsWindow.minSize = NSSize(width: 500, height: 360)
+        groupsWindow.isReleasedWhenClosed = false
+        groupsWindow.center()
+        groupsWindow.delegate = self
+
+        let contentView = NSView()
+        groupsWindow.contentView = contentView
+        let root = NSStackView()
+        root.orientation = .vertical
+        root.alignment = .leading
+        root.spacing = 12
+        root.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(root)
+        NSLayoutConstraint.activate([
+            root.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 24),
+            root.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -24),
+            root.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 22),
+            root.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -18)
+        ])
+
+        let title = NSTextField(labelWithString: L10n.text("settings.groups.title", fallback: "設定共有グループ"))
+        title.font = .systemFont(ofSize: 19, weight: .semibold)
+        root.addArrangedSubview(title)
+        let description = NSTextField(
+            wrappingLabelWithString: L10n.text(
+                "settings.groups.description",
+                fallback: "各プロファイルが参加している共有グループと、共有している設定項目を確認できます。"
+            )
+        )
+        description.font = .systemFont(ofSize: 12)
+        description.textColor = .secondaryLabelColor
+        description.maximumNumberOfLines = 2
+        root.addArrangedSubview(description)
+        description.widthAnchor.constraint(equalTo: root.widthAnchor).isActive = true
+
+        let scrollView = NSScrollView()
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.drawsBackground = false
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        let groupStack = NSStackView()
+        groupStack.orientation = .vertical
+        groupStack.alignment = .leading
+        groupStack.spacing = 10
+        groupStack.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.documentView = groupStack
+        root.addArrangedSubview(scrollView)
+        scrollView.widthAnchor.constraint(equalTo: root.widthAnchor).isActive = true
+        groupStack.widthAnchor.constraint(equalTo: scrollView.contentView.widthAnchor).isActive = true
+        scrollView.setContentHuggingPriority(.defaultLow, for: .vertical)
+        scrollView.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
+
+        let groups = launcher.settingsGroups()
+        if groups.isEmpty {
+            let empty = NSTextField(
+                wrappingLabelWithString: L10n.text(
+                    "settings.groups.empty",
+                    fallback: "共有グループはまだありません。プロファイルの「…」メニューから作成できます。"
+                )
+            )
+            empty.font = .systemFont(ofSize: 13)
+            empty.textColor = .secondaryLabelColor
+            empty.maximumNumberOfLines = 2
+            groupStack.addArrangedSubview(empty)
+        } else {
+            for group in groups.sorted(by: { $0.name.localizedStandardCompare($1.name) == .orderedAscending }) {
+                let card = ProfileCardView()
+                card.translatesAutoresizingMaskIntoConstraints = false
+                let stack = NSStackView()
+                stack.orientation = .vertical
+                stack.alignment = .leading
+                stack.spacing = 5
+                stack.translatesAutoresizingMaskIntoConstraints = false
+                card.addSubview(stack)
+                NSLayoutConstraint.activate([
+                    stack.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 14),
+                    stack.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -14),
+                    stack.topAnchor.constraint(equalTo: card.topAnchor, constant: 12),
+                    stack.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -12)
+                ])
+                let groupTitle = NSTextField(labelWithString: group.name)
+                groupTitle.font = .systemFont(ofSize: 14, weight: .semibold)
+                stack.addArrangedSubview(groupTitle)
+                let memberNames = group.members.map(profileDisplayName(for:)).joined(separator: "、")
+                let members = NSTextField(
+                    wrappingLabelWithString: L10n.text(
+                        "settings.groups.members",
+                        fallback: "参加プロファイル: {members}",
+                        replacing: ["members": memberNames]
+                    )
+                )
+                members.font = .systemFont(ofSize: 12)
+                members.textColor = .secondaryLabelColor
+                members.maximumNumberOfLines = 2
+                stack.addArrangedSubview(members)
+                let itemNames = group.items.map(\.displayName).joined(separator: "、")
+                let items = NSTextField(
+                    wrappingLabelWithString: L10n.text(
+                        "settings.groups.items",
+                        fallback: "共有項目: {items}",
+                        replacing: ["items": itemNames]
+                    )
+                )
+                items.font = .systemFont(ofSize: 12)
+                items.textColor = .secondaryLabelColor
+                items.maximumNumberOfLines = 2
+                stack.addArrangedSubview(items)
+                let updated = NSTextField(
+                    labelWithString: L10n.text(
+                        "settings.groups.updated",
+                        fallback: "最終更新: {date}",
+                        replacing: ["date": formatFetchDate(group.updatedAt)]
+                    )
+                )
+                updated.font = .systemFont(ofSize: 10)
+                updated.textColor = .tertiaryLabelColor
+                stack.addArrangedSubview(updated)
+                groupStack.addArrangedSubview(card)
+                card.widthAnchor.constraint(equalTo: groupStack.widthAnchor).isActive = true
+            }
+        }
+
+        let footer = NSStackView()
+        footer.orientation = .horizontal
+        footer.alignment = .centerY
+        footer.translatesAutoresizingMaskIntoConstraints = false
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        footer.addArrangedSubview(spacer)
+        let close = NSButton(title: L10n.text("common.close", fallback: "閉じる"), target: self, action: #selector(closeGroupsWindow))
+        close.bezelStyle = .rounded
+        close.keyEquivalent = "\u{1b}"
+        footer.addArrangedSubview(close)
+        root.addArrangedSubview(footer)
+        footer.widthAnchor.constraint(equalTo: root.widthAnchor).isActive = true
+
+        self.groupsWindow = groupsWindow
+        groupsWindow.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @objc
+    private func closeGroupsWindow() {
+        groupsWindow?.performClose(nil)
+    }
+
+    private func profileDisplayName(for reference: ProfileStorageReference) -> String {
+        launcher.accounts.first(where: { launcher.settingsStorageReference(for: $0) == reference })?.name
+            ?? reference.stableKey
+    }
+
+    private func makeRegistryHealthRow(
+        title: String,
+        health: ProfileRegistryHealth,
+        action: Selector
+    ) -> (stack: NSStackView, label: NSTextField, button: NSButton) {
+        let stack = NSStackView()
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 8
+        let titleLabel = NSTextField(labelWithString: title)
+        titleLabel.font = .systemFont(ofSize: 12)
+        let label = NSTextField(labelWithString: profileRegistryHealthText(health))
+        label.font = .systemFont(ofSize: 12, weight: .medium)
+        label.textColor = health.state == .corrupted ? .systemRed : .secondaryLabelColor
+        label.setContentHuggingPriority(.required, for: .horizontal)
+        let button = NSButton(
+            title: L10n.text("settings.health.restore", fallback: "バックアップから復元"),
+            target: self,
+            action: action
+        )
+        button.bezelStyle = .rounded
+        button.controlSize = .small
+        button.identifier = NSUserInterfaceItemIdentifier(health.backupAvailable ? "available" : "unavailable")
+        button.isHidden = health.state == .healthy || !health.backupAvailable
+        stack.addArrangedSubview(titleLabel)
+        stack.addArrangedSubview(NSView())
+        stack.addArrangedSubview(label)
+        stack.addArrangedSubview(button)
+        stack.widthAnchor.constraint(equalToConstant: 496).isActive = true
+        return (stack, label, button)
+    }
+
+    private func profileRegistryHealthText(_ health: ProfileRegistryHealth) -> String {
+        switch health.state {
+        case .healthy:
+            return L10n.text("settings.health.healthy", fallback: "正常")
+        case .missing:
+            return L10n.text("settings.health.missing", fallback: "未作成")
+        case .corrupted:
+            return health.backupAvailable
+                ? L10n.text("settings.health.corrupted-backup", fallback: "読み込み失敗（復元可能）")
+                : L10n.text("settings.health.corrupted", fallback: "読み込み失敗")
+        }
+    }
+
+    private func settingsRegistryHealthText(_ health: SettingsRegistryHealth) -> String {
+        switch health.state {
+        case .healthy:
+            return L10n.text("settings.health.healthy", fallback: "正常")
+        case .missing:
+            return L10n.text("settings.health.missing", fallback: "未作成")
+        case .corrupted:
+            return health.backupAvailable
+                ? L10n.text("settings.health.corrupted-backup", fallback: "読み込み失敗（復元可能）")
+                : L10n.text("settings.health.corrupted", fallback: "読み込み失敗")
+        }
+    }
+
+    private func makeSettingsHealthRow(
+        title: String,
+        health: SettingsRegistryHealth,
+        action: Selector
+    ) -> (stack: NSStackView, label: NSTextField, button: NSButton) {
+        let stack = NSStackView()
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 8
+        let titleLabel = NSTextField(labelWithString: title)
+        titleLabel.font = .systemFont(ofSize: 12)
+        let label = NSTextField(labelWithString: settingsRegistryHealthText(health))
+        label.font = .systemFont(ofSize: 12, weight: .medium)
+        label.textColor = health.state == .corrupted ? .systemRed : .secondaryLabelColor
+        label.setContentHuggingPriority(.required, for: .horizontal)
+        let button = NSButton(
+            title: L10n.text("settings.health.restore", fallback: "バックアップから復元"),
+            target: self,
+            action: action
+        )
+        button.bezelStyle = .rounded
+        button.controlSize = .small
+        button.isHidden = health.state == .healthy || !health.backupAvailable
+        stack.addArrangedSubview(titleLabel)
+        stack.addArrangedSubview(NSView())
+        stack.addArrangedSubview(label)
+        stack.addArrangedSubview(button)
+        stack.widthAnchor.constraint(equalToConstant: 496).isActive = true
+        return (stack, label, button)
+    }
+
+    private func makeDependencyHealthRow(title: String, available: Bool) -> NSStackView {
+        let stack = NSStackView()
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 8
+        let titleLabel = NSTextField(labelWithString: title)
+        titleLabel.font = .systemFont(ofSize: 12)
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let statusLabel = NSTextField(
+            labelWithString: available
+                ? L10n.text("settings.health.detected", fallback: "検出済み")
+                : L10n.text("settings.health.not-detected", fallback: "未検出")
+        )
+        statusLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        statusLabel.textColor = available ? .systemGreen : .systemOrange
+        stack.addArrangedSubview(titleLabel)
+        stack.addArrangedSubview(spacer)
+        stack.addArrangedSubview(statusLabel)
+        stack.widthAnchor.constraint(equalToConstant: 496).isActive = true
+        return stack
+    }
+
+    @objc
+    private func restoreProfileRegistryFromSettings(_ sender: NSButton) {
+        do {
+            _ = try launcher.restoreProfileRegistryFromBackup()
+            refreshUI()
+            closeSettings()
+            showTransientStatus(L10n.text("settings.health.restored", fallback: "プロファイル管理情報を復元しました。"))
+        } catch {
+            presentError(error, title: L10n.text("settings.health.restore-failed", fallback: "プロファイル管理情報を復元できませんでした"))
+        }
+    }
+
+    @objc
+    private func restoreSettingsRegistryFromSettings(_ sender: NSButton) {
+        do {
+            _ = try launcher.restoreSettingsRegistryFromBackup()
+            closeSettings()
+            refreshUI()
+            showTransientStatus(L10n.text("settings.health.restored-settings", fallback: "共有グループの管理情報を復元しました。"))
+        } catch {
+            presentError(error, title: L10n.text("settings.health.restore-failed-settings", fallback: "共有グループの管理情報を復元できませんでした"))
+        }
     }
 
     private func localizedLanguageName(_ language: AppLanguage) -> String {
@@ -2341,6 +3221,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         let previousLanguage = L10n.language
         let preference = AppLanguagePreference.allCases[selectedIndex]
         L10n.setLanguagePreference(preference)
+        UserDefaults.standard.set(
+            settingsUsageNotificationCheckbox?.state == .on,
+            forKey: usageNotificationsEnabledKey
+        )
+        scheduleUsageResetNotifications(
+            for: launcher.accounts.compactMap { account in
+                guard let snapshot = usageByAccountID[account.id] else { return nil }
+                return (account, snapshot)
+            }
+        )
         let languageChanged = previousLanguage != L10n.language
         if languageChanged {
             isRebuildingInterface = true
@@ -3820,10 +4710,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
 
     private func launchAccount(_ accountID: UUID) {
         guard !isLaunching else {
-            showTransientStatus(
+            presentWarning(
                 L10n.text(
                     "launcher.busy",
                     fallback: "別のプロファイルを起動中です。しばらく待ってから再試行してください。"
+                ),
+                title: L10n.text(
+                    "launcher.busy-title",
+                    fallback: "別のプロファイルを起動中です"
                 )
             )
             return
@@ -4337,14 +5231,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         _ error: Error,
         title: String? = nil
     ) {
+        presentWarning(
+            error.localizedDescription,
+            title: title ?? L10n.text(
+                "account.open.error-title",
+                fallback: "プロファイルを起動できませんでした"
+            )
+        )
+    }
+
+    private func presentWarning(_ message: String, title: String) {
         showMainWindow()
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = title ?? L10n.text(
-            "account.open.error-title",
-            fallback: "プロファイルを起動できませんでした"
-        )
-        alert.informativeText = error.localizedDescription
+        alert.messageText = title
+        alert.informativeText = message
         alert.addButton(withTitle: L10n.text("common.ok", fallback: "OK"))
         alert.runModal()
     }

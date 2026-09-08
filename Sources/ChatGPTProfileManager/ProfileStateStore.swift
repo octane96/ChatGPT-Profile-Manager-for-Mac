@@ -1,5 +1,16 @@
 import Foundation
 
+enum ProfileRegistryHealthState: Equatable, Sendable {
+    case healthy
+    case missing
+    case corrupted
+}
+
+struct ProfileRegistryHealth: Equatable, Sendable {
+    let state: ProfileRegistryHealthState
+    let backupAvailable: Bool
+}
+
 struct RunningProfileInstance: Codable, Equatable, Sendable {
     let accountID: UUID
     let processIdentifier: Int32
@@ -9,6 +20,7 @@ struct ProfileStateStore {
     private let defaults: UserDefaults
 
     private let accountsKey = "accountsV2"
+    private let accountsBackupKey = "accountsV2Backup"
     private let lastLaunchedAccountIDKey = "lastLaunchedAccountID"
     private let existingEnvironmentAccountIDKey = "existingEnvironmentAccountID"
     private let hasShownMechanismGuideKey = "hasShownMechanismGuide"
@@ -30,6 +42,32 @@ struct ProfileStateStore {
             return []
         }
         return decoded
+    }
+
+    /// Distinguishes a first launch from a registry that exists but can no
+    /// longer be decoded. The latter must not silently look like an empty
+    /// profile list because it can hide the user's registrations.
+    var registryHealth: ProfileRegistryHealth {
+        guard let data = defaults.data(forKey: accountsKey) else {
+            return ProfileRegistryHealth(
+                state: .missing,
+                backupAvailable: validBackupData != nil
+            )
+        }
+        let state: ProfileRegistryHealthState = (try? JSONDecoder().decode([AccountProfile].self, from: data)) != nil
+            ? .healthy
+            : .corrupted
+        return ProfileRegistryHealth(state: state, backupAvailable: validBackupData != nil)
+    }
+
+    @discardableResult
+    func restoreAccountsFromBackup() throws -> [AccountProfile] {
+        guard let data = validBackupData else {
+            throw ProfileManagerError.profileRegistryBackupUnavailable
+        }
+        let restored = try JSONDecoder().decode([AccountProfile].self, from: data)
+        try saveAccounts(restored)
+        return restored
     }
 
     /// Indicates whether this app has written an account registry before.
@@ -366,8 +404,22 @@ struct ProfileStateStore {
     }
 
     private func saveAccounts(_ accounts: [AccountProfile]) throws {
+        if let currentData = defaults.data(forKey: accountsKey),
+           (try? JSONDecoder().decode([AccountProfile].self, from: currentData)) != nil {
+            defaults.set(currentData, forKey: accountsBackupKey)
+        }
         let data = try JSONEncoder().encode(accounts)
         defaults.set(data, forKey: accountsKey)
+    }
+
+    private var validBackupData: Data? {
+        guard
+            let data = defaults.data(forKey: accountsBackupKey),
+            (try? JSONDecoder().decode([AccountProfile].self, from: data)) != nil
+        else {
+            return nil
+        }
+        return data
     }
 
     private var runningProfileInstances: [RunningProfileInstance] {
@@ -417,6 +469,7 @@ struct ProfileStateStore {
             return
         }
         defaults.set(data, forKey: accountsKey)
+        defaults.set(data, forKey: accountsBackupKey)
 
         let existingAccount = existingLegacyProfile == "personal"
             ? firstAccount

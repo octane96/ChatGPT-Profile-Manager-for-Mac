@@ -75,6 +75,12 @@ struct AccountProfile: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
+enum ProfileLoginState: Equatable, Sendable {
+    case signedIn(email: String)
+    case signedOut
+    case unavailable
+}
+
 /// A non-sensitive identity marker kept in every isolated profile root.
 struct ProfileIdentityMarker: Codable, Equatable, Sendable {
     static let fileName = ".chatgpt-profile-manager-profile.json"
@@ -274,6 +280,7 @@ enum ProfileManagerError: LocalizedError, Equatable {
     case codexAppNotFound
     case codexMustBeClosed
     case accountNotFound
+    case profileRegistryBackupUnavailable
     case linkedAccountCannotBeDeleted
     case invalidAccountName
     case duplicateAccountName
@@ -315,6 +322,11 @@ enum ProfileManagerError: LocalizedError, Equatable {
             return L10n.text(
                 "error.account-not-found",
                 fallback: "選択したアカウントが見つかりませんでした。"
+            )
+        case .profileRegistryBackupUnavailable:
+            return L10n.text(
+                "error.profile-registry-backup-unavailable",
+                fallback: "プロファイル管理情報の利用可能なバックアップが見つかりませんでした。"
             )
         case .linkedAccountCannotBeDeleted:
             return L10n.text(

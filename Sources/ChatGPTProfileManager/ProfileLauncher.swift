@@ -73,6 +73,12 @@ struct ProfileLauncherError: LocalizedError, Equatable {
     }
 }
 
+enum ProfileLauncherStatus: Equatable, Sendable {
+    case notCreated
+    case current
+    case needsUpdate
+}
+
 /// Creates a profile-specific .app bundle that launches ChatGPT with the
 /// profile's isolated storage paths. The launcher filename uses the
 /// `ChatGPT {profile name}` format so it is easy to identify in Finder and
@@ -181,6 +187,28 @@ final class ProfileLauncherStore {
 
     func hasLauncher(for account: AccountProfile) -> Bool {
         existingLauncherURL(for: account) != nil
+    }
+
+    func status(for account: AccountProfile) -> ProfileLauncherStatus {
+        guard let url = existingLauncherURL(for: account) else {
+            return .notCreated
+        }
+        // Read the plist directly instead of relying on Bundle's cached
+        // information. This makes a profile rename or a manually stale
+        // launcher visible immediately after the bundle was changed.
+        let infoURL = url.appendingPathComponent("Contents/Info.plist")
+        let info = (try? Data(contentsOf: infoURL)).flatMap { data in
+            try? PropertyListSerialization.propertyList(
+                from: data,
+                format: nil
+            ) as? [String: Any]
+        }
+        guard let displayName = info?["CFBundleDisplayName"] as? String,
+              displayName == launcherDisplayName(for: sanitizedLauncherName(for: account.name)),
+              url.deletingPathExtension().lastPathComponent == displayName else {
+            return .needsUpdate
+        }
+        return .current
     }
 
     @discardableResult

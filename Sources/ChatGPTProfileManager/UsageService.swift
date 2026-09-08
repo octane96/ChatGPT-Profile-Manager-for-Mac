@@ -188,6 +188,13 @@ enum UsageService {
         }
     }
 
+    static func codexExecutableURLForDiagnostics(
+        fileManager: FileManager = .default,
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> URL? {
+        codexExecutableURL(fileManager: fileManager, homeDirectory: homeDirectory)
+    }
+
     private static func codexExecutableURL(
         fileManager: FileManager = .default,
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
