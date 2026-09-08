@@ -365,6 +365,8 @@
 "settings-sharing.diff-error-title" = "Couldn’t preview settings changes";
 "settings-sharing.diff-message" = "The following changes will be applied from “{source}” to “{destination}”. File contents are not shown.";
 "settings-sharing.diff-backup-note" = "Existing destination settings will be backed up before copying.";
+"settings-sharing.diff.details-title" = "Result by setting";
+"settings-sharing.diff.empty" = "There are no differences in the selected settings.";
 "settings-sharing.diff.source-missing" = "Missing from source";
 "settings-sharing.diff.new" = "New item";
 "settings-sharing.diff.same" = "No change";

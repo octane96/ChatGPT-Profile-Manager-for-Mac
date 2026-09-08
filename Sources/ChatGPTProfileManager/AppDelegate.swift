@@ -2345,53 +2345,159 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         destination: AccountProfile,
         diff: [SettingsCopyDiff]
     ) -> Bool {
-        let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: 440, height: 130))
-        textView.isEditable = false
-        textView.isSelectable = true
-        textView.drawsBackground = false
-        textView.font = .systemFont(ofSize: 12)
-        textView.textContainerInset = NSSize(width: 4, height: 6)
-        let lines = diff.map { entry -> String in
+        let statusForEntry: (SettingsCopyDiff) -> (symbol: String, text: String, color: NSColor) = { entry in
             let status: String
+            let symbol: String
+            let color: NSColor
             if !entry.sourceExists {
                 status = L10n.text("settings-sharing.diff.source-missing", fallback: "コピー元にありません")
+                symbol = "−"
+                color = .systemRed
             } else if !entry.destinationExists {
                 status = L10n.text("settings-sharing.diff.new", fallback: "新規追加")
+                symbol = "+"
+                color = .systemGreen
             } else if entry.identical {
                 status = L10n.text("settings-sharing.diff.same", fallback: "変更なし")
+                symbol = "✓"
+                color = .secondaryLabelColor
             } else {
                 status = L10n.text("settings-sharing.diff.changed", fallback: "変更あり")
+                symbol = "↔"
+                color = .systemOrange
             }
-            return "\(entry.setting.displayName): \(status)"
+            return (symbol, status, color)
         }
-        textView.string = lines.joined(separator: "\n")
-        let accessory = NSStackView()
-        accessory.orientation = .vertical
-        accessory.alignment = .leading
-        accessory.spacing = 8
-        accessory.addArrangedSubview(
-            NSTextField(
-                wrappingLabelWithString: L10n.text(
-                    "settings-sharing.diff.message",
-                    fallback: "コピー元「{source}」からコピー先「{destination}」へ反映される差分です。内容そのものは表示しません。",
-                    replacing: ["source": source.name, "destination": destination.name]
-                )
-            )
-        )
-        accessory.addArrangedSubview(textView)
-        accessory.setFrameSize(NSSize(width: 450, height: accessory.fittingSize.height))
 
-        let alert = NSAlert()
-        alert.alertStyle = .informational
-        alert.messageText = L10n.text("settings-sharing.diff-title", fallback: "設定コピー前の差分")
-        alert.informativeText = L10n.text(
+        // Keep the diff in its own panel. NSAlert places accessory views beside its
+        // message area and can collapse or clip a multi-row settings summary.
+        let diffList = NSStackView()
+        diffList.orientation = .vertical
+        diffList.alignment = .leading
+        diffList.spacing = 6
+        diffList.translatesAutoresizingMaskIntoConstraints = false
+        for entry in diff {
+            let result = statusForEntry(entry)
+            let symbol = NSTextField(labelWithString: result.symbol)
+            symbol.font = .systemFont(ofSize: 13, weight: .semibold)
+            symbol.textColor = result.color
+            symbol.alignment = .center
+            symbol.setContentHuggingPriority(.required, for: .horizontal)
+            symbol.widthAnchor.constraint(equalToConstant: 18).isActive = true
+
+            let setting = NSTextField(labelWithString: entry.setting.displayName)
+            setting.font = .systemFont(ofSize: 12, weight: .medium)
+            setting.textColor = .labelColor
+            setting.lineBreakMode = .byTruncatingMiddle
+            setting.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+            let status = NSTextField(labelWithString: result.text)
+            status.font = .systemFont(ofSize: 12)
+            status.textColor = result.color
+            status.alignment = .right
+            status.setContentHuggingPriority(.required, for: .horizontal)
+
+            let row = NSStackView(views: [symbol, setting, status])
+            row.orientation = .horizontal
+            row.alignment = .centerY
+            row.spacing = 6
+            row.translatesAutoresizingMaskIntoConstraints = false
+            row.widthAnchor.constraint(equalToConstant: 450).isActive = true
+            diffList.addArrangedSubview(row)
+        }
+        if diff.isEmpty {
+            let empty = NSTextField(wrappingLabelWithString: L10n.text(
+                "settings-sharing.diff.empty",
+                fallback: "選択した設定の差分はありません。"
+            ))
+            empty.font = .systemFont(ofSize: 12)
+            empty.textColor = .secondaryLabelColor
+            diffList.addArrangedSubview(empty)
+        }
+
+        let contentStack = NSStackView()
+        contentStack.orientation = .vertical
+        contentStack.alignment = .leading
+        contentStack.spacing = 14
+        contentStack.translatesAutoresizingMaskIntoConstraints = false
+        let title = NSTextField(labelWithString: L10n.text(
+            "settings-sharing.diff-title",
+            fallback: "設定コピー前の差分"
+        ))
+        title.font = .systemFont(ofSize: 20, weight: .bold)
+        contentStack.addArrangedSubview(title)
+        let message = NSTextField(wrappingLabelWithString: L10n.text(
+            "settings-sharing.diff.message",
+            fallback: "コピー元「{source}」からコピー先「{destination}」へ反映される差分です。内容そのものは表示しません。",
+            replacing: ["source": source.name, "destination": destination.name]
+        ))
+        message.font = .systemFont(ofSize: 12)
+        message.textColor = .secondaryLabelColor
+        message.widthAnchor.constraint(equalToConstant: 500).isActive = true
+        contentStack.addArrangedSubview(message)
+        let backupNote = NSTextField(wrappingLabelWithString: L10n.text(
             "settings-sharing.diff-backup-note",
             fallback: "実行するとコピー先の既存設定はバックアップされます。"
+        ))
+        backupNote.font = .systemFont(ofSize: 12)
+        backupNote.textColor = .secondaryLabelColor
+        backupNote.widthAnchor.constraint(equalToConstant: 500).isActive = true
+        contentStack.addArrangedSubview(backupNote)
+        let detailsTitle = NSTextField(labelWithString: L10n.text(
+            "settings-sharing.diff.details-title",
+            fallback: "項目ごとの結果"
+        ))
+        detailsTitle.font = .systemFont(ofSize: 12, weight: .semibold)
+        detailsTitle.textColor = .secondaryLabelColor
+        contentStack.addArrangedSubview(detailsTitle)
+        contentStack.addArrangedSubview(diffList)
+
+        let footer = NSStackView()
+        footer.orientation = .horizontal
+        footer.spacing = 8
+        footer.addArrangedSubview(NSView())
+        let cancel = NSButton(
+            title: L10n.text("common.cancel", fallback: "キャンセル"),
+            target: self,
+            action: #selector(finishShareDialog(_:))
         )
-        alert.accessoryView = accessory
-        alert.addButton(withTitle: L10n.text("settings-sharing.copy-confirm", fallback: "コピー"))
-        alert.addButton(withTitle: L10n.text("common.cancel", fallback: "キャンセル"))
-        return alert.runModal() == .alertFirstButtonReturn
+        cancel.bezelStyle = .rounded
+        cancel.tag = NSApplication.ModalResponse.cancel.rawValue
+        cancel.keyEquivalent = "\u{1b}"
+        let copy = NSButton(
+            title: L10n.text("settings-sharing.copy-confirm", fallback: "コピー"),
+            target: self,
+            action: #selector(finishShareDialog(_:))
+        )
+        copy.bezelStyle = .rounded
+        copy.tag = NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
+        copy.keyEquivalent = "\r"
+        footer.addArrangedSubview(cancel)
+        footer.addArrangedSubview(copy)
+        footer.widthAnchor.constraint(equalToConstant: 500).isActive = true
+        contentStack.addArrangedSubview(footer)
+
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 548, height: max(contentStack.fittingSize.height + 48, 300)),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        panel.title = title.stringValue
+        panel.isReleasedWhenClosed = false
+        let content = panel.contentView!
+        content.addSubview(contentStack)
+        NSLayoutConstraint.activate([
+            contentStack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 24),
+            contentStack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24),
+            contentStack.topAnchor.constraint(equalTo: content.topAnchor, constant: 24),
+            contentStack.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -24)
+        ])
+        panel.center()
+        panel.initialFirstResponder = copy
+        defer { panel.orderOut(nil) }
+        panel.makeKeyAndOrderFront(nil)
+        return NSApp.runModal(for: panel) == .alertFirstButtonReturn
     }
 
     private func leaveSettingsShare(accountID: UUID) {
