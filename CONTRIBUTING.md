@@ -31,11 +31,15 @@ swift build --disable-sandbox --configuration release
 
 ## Development workflow / 開発の流れ
 
+**English**
+
 1. Create a topic branch; do not work directly on `master` or `staging`.
 2. Keep each change focused and explain the user-visible impact.
 3. Add or update regression tests for observable behavior changes.
 4. Run the tests and release build locally.
 5. Open a Pull Request with a summary, verification commands, and any known limitations.
+
+**日本語**
 
 1. 作業用ブランチを作成し、`master`や`staging`へ直接変更を加えない。
 2. 変更の目的を絞り、利用者に見える影響を説明する。
