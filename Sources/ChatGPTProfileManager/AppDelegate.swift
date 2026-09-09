@@ -1,4 +1,5 @@
 import AppKit
+import ServiceManagement
 import UserNotifications
 
 private struct DiagnosticsTaskError: LocalizedError, Sendable {
@@ -52,6 +53,12 @@ private final class ProfileBadgeView: NSView {
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+}
+
+private final class MenuBarUsageLabel: NSTextField {
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
     }
 }
 
@@ -118,6 +125,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     private var usageRefreshButton: NSButton?
     private weak var settingsLanguagePopup: NSPopUpButton?
     private weak var settingsUsageNotificationCheckbox: NSButton?
+    private weak var settingsUsageWarningCheckbox: NSButton?
+    private weak var settingsUsageCriticalCheckbox: NSButton?
+    private weak var settingsCompactUsageCheckbox: NSButton?
+    private weak var settingsLoginItemCheckbox: NSButton?
     private weak var settingsProfileHealthLabel: NSTextField?
     private weak var settingsSettingsHealthLabel: NSTextField?
     private weak var settingsProfileRestoreButton: NSButton?
@@ -130,15 +141,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         case failed(Date?)
     }
     private var usageFetchStates: [UUID: UsageFetchState] = [:]
+    private var usageLastUpdatedAt: [UUID: Date] = [:]
+    private var notifiedUsageThresholds: Set<String> = []
+    private var usageRefreshTimer: Timer?
+    private var lastUsageRefreshAt: Date?
     private var scheduledUsageNotificationIDs: Set<String> = []
     private let usageNotificationsEnabledKey = "usageResetNotificationsEnabled"
+    private let usageWarningNotificationsEnabledKey = "usageWarningNotificationsEnabled"
+    private let usageCriticalNotificationsEnabledKey = "usageCriticalNotificationsEnabled"
+    private let compactUsageStatusEnabledKey = MenuBarPreferences.compactUsageStatusKey
     private let scheduledUsageNotificationIDsKey = "scheduledUsageNotificationIDs"
     private var expandedResetCreditAccountIDs: Set<UUID> = []
+    private var expandedMenuBarResetCreditAccountIDs: Set<UUID> = []
     private let collapsedAccountRowHeight: CGFloat = 120
     private let expandedAccountRowHeight: CGFloat = 152
     private var editingAccountID: UUID?
     private weak var editingNameField: NSTextField?
     private var usageRefreshTask: Task<Void, Never>?
+    private var statusItem: NSStatusItem?
+    private var statusPopover: NSPopover?
+    private var statusPopoverDocument: NSView?
+    private var statusPopoverStack: NSStackView?
+    private weak var statusUsageLabel: MenuBarUsageLabel?
+    private let menuBarIcon = MenuBarIcon.make()
+    private var launchedInBackground = false
     private var isRebuildingInterface = false
     private var isLaunching = false {
         didSet {
@@ -146,10 +172,465 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         }
     }
 
+    private var usageWarningNotificationsEnabled: Bool {
+        UserDefaults.standard.bool(forKey: usageWarningNotificationsEnabledKey)
+    }
+
+    private var usageCriticalNotificationsEnabled: Bool {
+        UserDefaults.standard.bool(forKey: usageCriticalNotificationsEnabledKey)
+    }
+
+    private var compactUsageStatusEnabled: Bool {
+        MenuBarPreferences.compactUsageEnabled(in: UserDefaults.standard)
+    }
+
+    private func configureStatusItem() {
+        guard statusItem == nil else { return }
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        guard let button = item.button else { return }
+        button.image = menuBarIcon
+        button.imagePosition = .imageOnly
+        button.imageScaling = .scaleProportionallyDown
+        button.target = self
+        button.action = #selector(toggleStatusPopover)
+
+        let usageLabel = MenuBarUsageLabel(labelWithString: "")
+        usageLabel.font = .monospacedDigitSystemFont(ofSize: 10, weight: .semibold)
+        usageLabel.alignment = .left
+        usageLabel.maximumNumberOfLines = 2
+        usageLabel.lineBreakMode = .byClipping
+        usageLabel.translatesAutoresizingMaskIntoConstraints = false
+        usageLabel.isHidden = true
+        button.addSubview(usageLabel)
+        NSLayoutConstraint.activate([
+            usageLabel.leadingAnchor.constraint(equalTo: button.leadingAnchor),
+            usageLabel.trailingAnchor.constraint(equalTo: button.trailingAnchor),
+            usageLabel.centerYAnchor.constraint(equalTo: button.centerYAnchor)
+        ])
+        statusUsageLabel = usageLabel
+        button.setAccessibilityLabel(L10n.text(
+            "menubar.accessibility-label",
+            fallback: "ChatGPT Profile Managerの利用状況"
+        ))
+        button.toolTip = L10n.text(
+            "menubar.tooltip",
+            fallback: "ChatGPT Profile Managerの利用状況を表示"
+        )
+        statusItem = item
+
+        let popover = NSPopover()
+        popover.behavior = .transient
+        // Replacing the account cards while the popover is open must not
+        // animate the popover window itself. The content is updated in place
+        // below, so an animated resize only looks like a flash to the user.
+        popover.animates = false
+        statusPopover = popover
+        updateStatusItem()
+    }
+
+    private func startUsageRefreshTimer() {
+        usageRefreshTimer?.invalidate()
+        usageRefreshTimer = Timer.scheduledTimer(withTimeInterval: 15 * 60, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.refreshUsage()
+            }
+        }
+    }
+
+    @objc
+    private func systemDidWake(_ notification: Notification) {
+        refreshUsage()
+    }
+
+    private var menuBarAccounts: [AccountProfile] {
+        launcher.accounts
+            .enumerated()
+            .filter { $0.element.showsInMenuBar }
+            .sorted { lhs, rhs in
+                if lhs.element.isFavorite != rhs.element.isFavorite {
+                    return lhs.element.isFavorite && !rhs.element.isFavorite
+                }
+                return lhs.offset < rhs.offset
+            }
+            .map(\.element)
+    }
+
+    private func updateStatusItem() {
+        guard let button = statusItem?.button else { return }
+        guard compactUsageStatusEnabled else {
+            button.title = ""
+            button.font = nil
+            button.alignment = .center
+            statusUsageLabel?.isHidden = true
+            statusItem?.length = NSStatusItem.variableLength
+            button.image = menuBarIcon
+            button.imagePosition = .imageOnly
+            button.imageScaling = .scaleProportionallyDown
+            button.toolTip = L10n.text(
+                "menubar.tooltip",
+                fallback: "ChatGPT Profile Managerの利用状況を表示"
+            )
+            return
+        }
+
+        let accounts = menuBarAccounts
+        let summary = MenuBarUsageSummary.minimum(
+            accountIDs: accounts.map(\.id),
+            snapshots: usageByAccountID
+        )
+        let title = summary.title
+        button.title = ""
+        button.font = nil
+        button.alignment = .center
+        button.image = nil
+        button.imagePosition = .noImage
+        statusUsageLabel?.stringValue = title
+        statusUsageLabel?.isHidden = false
+        if let labelWidth = statusUsageLabel?.fittingSize.width {
+            statusItem?.length = max(NSStatusBar.system.thickness, ceil(labelWidth))
+        }
+        let scope = L10n.text(
+            "menubar.scope-tooltip",
+            fallback: "表示中の{count}プロファイルの最小残量",
+            replacing: ["count": "\(accounts.count)"]
+        )
+        let updated = lastUsageRefreshAt.map { formatFetchDate($0) }
+            ?? L10n.text("common.unknown", fallback: "不明")
+        button.toolTip = "\(scope)（\(L10n.text("usage.last-updated", fallback: "最終確認: {date}", replacing: ["date": updated]))）"
+    }
+
+    @objc
+    private func toggleStatusPopover() {
+        guard let popover = statusPopover, let button = statusItem?.button else { return }
+        if popover.isShown {
+            popover.performClose(nil)
+            return
+        }
+        if lastUsageRefreshAt == nil || Date().timeIntervalSince(lastUsageRefreshAt ?? .distantPast) > 5 * 60 {
+            refreshUsage()
+        }
+        updateStatusPopover()
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+    }
+
+    private func updateStatusPopover() {
+        guard let popover = statusPopover else { return }
+        let stack: NSStackView
+        if let existingStack = statusPopoverStack {
+            stack = existingStack
+            stack.arrangedSubviews.forEach { view in
+                stack.removeArrangedSubview(view)
+                view.removeFromSuperview()
+            }
+        } else {
+            let root = NSView()
+            let scroll = NSScrollView()
+            scroll.drawsBackground = false
+            scroll.hasVerticalScroller = true
+            scroll.hasHorizontalScroller = false
+            scroll.autohidesScrollers = true
+            scroll.translatesAutoresizingMaskIntoConstraints = false
+            // NSScrollView owns the document view's frame. Constraining it
+            // to the clip view creates mutually exclusive constraints on
+            // recent macOS versions, so keep the frame explicit and let
+            // Auto Layout size only the content inside it.
+            let document = NSView(frame: NSRect(x: 0, y: 0, width: 420, height: 1))
+            let newStack = NSStackView()
+            newStack.orientation = .vertical
+            newStack.alignment = .leading
+            newStack.spacing = 10
+            newStack.translatesAutoresizingMaskIntoConstraints = false
+            document.addSubview(newStack)
+            NSLayoutConstraint.activate([
+                newStack.leadingAnchor.constraint(equalTo: document.leadingAnchor, constant: 14),
+                newStack.trailingAnchor.constraint(equalTo: document.trailingAnchor, constant: -14),
+                newStack.topAnchor.constraint(equalTo: document.topAnchor, constant: 14),
+                newStack.widthAnchor.constraint(equalTo: document.widthAnchor, constant: -28)
+            ])
+            scroll.documentView = document
+            root.addSubview(scroll)
+            NSLayoutConstraint.activate([
+                scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+                scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+                scroll.topAnchor.constraint(equalTo: root.topAnchor),
+                scroll.bottomAnchor.constraint(equalTo: root.bottomAnchor)
+            ])
+
+            let controller = NSViewController()
+            controller.view = root
+            popover.contentViewController = controller
+            statusPopoverDocument = document
+            statusPopoverStack = newStack
+            stack = newStack
+        }
+
+        let header = NSStackView()
+        header.orientation = .horizontal
+        header.alignment = .centerY
+        header.spacing = 8
+        header.translatesAutoresizingMaskIntoConstraints = false
+        let title = NSTextField(labelWithString: L10n.text(
+            "menubar.title",
+            fallback: "利用状況"
+        ))
+        title.font = .systemFont(ofSize: 15, weight: .semibold)
+        header.addArrangedSubview(title)
+        header.addArrangedSubview(NSView())
+        let refreshButton = NSButton(
+            title: L10n.text("usage.refresh", fallback: "更新"),
+            target: self,
+            action: #selector(refreshUsageFromStatus(_:))
+        )
+        refreshButton.bezelStyle = .rounded
+        refreshButton.controlSize = .small
+        header.addArrangedSubview(refreshButton)
+        let mainButton = NSButton(
+            title: L10n.text("menubar.open-main", fallback: "メイン画面"),
+            target: self,
+            action: #selector(showMainWindowFromStatus(_:))
+        )
+        mainButton.bezelStyle = .rounded
+        mainButton.controlSize = .small
+        header.addArrangedSubview(mainButton)
+        stack.addArrangedSubview(header)
+        header.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+
+        let accounts = menuBarAccounts
+        if accounts.isEmpty {
+            let empty = NSTextField(wrappingLabelWithString: L10n.text(
+                "menubar.no-profiles",
+                fallback: "メニューバーに表示するプロファイルがありません。メイン画面の操作メニューから表示を有効にできます。"
+            ))
+            empty.font = .systemFont(ofSize: 12)
+            empty.textColor = .secondaryLabelColor
+            empty.maximumNumberOfLines = 3
+            stack.addArrangedSubview(empty)
+            empty.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        }
+
+        for account in accounts {
+            let card = makeMenuBarAccountCard(account)
+            // Keep cards aligned with the popover content instead of letting
+            // their intrinsic text width leave an empty column on the right.
+            stack.addArrangedSubview(card)
+            card.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        }
+
+        let footer = NSStackView()
+        footer.orientation = .horizontal
+        footer.alignment = .centerY
+        footer.spacing = 8
+        let settingsButton = NSButton(
+            title: L10n.text("menubar.settings", fallback: "設定"),
+            target: self,
+            action: #selector(showSettingsFromButton(_:))
+        )
+        settingsButton.bezelStyle = .rounded
+        settingsButton.controlSize = .small
+        footer.addArrangedSubview(settingsButton)
+        footer.addArrangedSubview(NSView())
+        let quitButton = NSButton(
+            title: L10n.text("menu.quit", fallback: "終了"),
+            target: NSApp,
+            action: #selector(NSApplication.terminate(_:))
+        )
+        quitButton.bezelStyle = .rounded
+        quitButton.controlSize = .small
+        footer.addArrangedSubview(quitButton)
+        stack.addArrangedSubview(footer)
+        footer.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+
+        // Derive the popover height from the content that is actually laid
+        // out. A per-account estimate leaves a large empty area when reset
+        // details are collapsed.
+        stack.layoutSubtreeIfNeeded()
+        let visibleSubviews = stack.arrangedSubviews.filter { !$0.isHidden }
+        let contentHeight = visibleSubviews.reduce(CGFloat.zero) { height, view in
+            view.layoutSubtreeIfNeeded()
+            return height + view.fittingSize.height
+        }
+        let spacingHeight = CGFloat(max(0, visibleSubviews.count - 1)) * stack.spacing
+        let desiredHeight = max(1, contentHeight + spacingHeight + 28)
+        let visibleHeight = min(620, desiredHeight)
+        if let document = statusPopoverDocument {
+            document.setFrameSize(NSSize(width: 420, height: desiredHeight))
+        }
+        popover.contentSize = NSSize(width: 420, height: visibleHeight)
+        updateStatusItem()
+    }
+
+    private func makeMenuBarAccountCard(_ account: AccountProfile) -> NSView {
+        let card = ProfileCardView()
+        card.translatesAutoresizingMaskIntoConstraints = false
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 6
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        card.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 10),
+            stack.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -10),
+            stack.topAnchor.constraint(equalTo: card.topAnchor, constant: 9),
+            stack.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -9)
+        ])
+
+        let header = NSStackView()
+        header.orientation = .horizontal
+        header.alignment = .centerY
+        header.spacing = 6
+        let name = NSTextField(labelWithString: account.name)
+        name.font = .systemFont(ofSize: 13, weight: .semibold)
+        name.lineBreakMode = .byTruncatingTail
+        name.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        header.addArrangedSubview(name)
+        header.addArrangedSubview(NSView())
+        let openButton = NSButton(
+            title: launcher.isAccountRunning(id: account.id)
+                ? L10n.text("account.focus", fallback: "開く")
+                : L10n.text("account.open", fallback: "起動"),
+            target: self,
+            action: #selector(openAccount(_:))
+        )
+        openButton.identifier = NSUserInterfaceItemIdentifier(account.id.uuidString)
+        openButton.bezelStyle = .rounded
+        openButton.controlSize = .small
+        header.addArrangedSubview(openButton)
+        if launcher.isAccountRunning(id: account.id) {
+            let quit = NSButton(
+                title: L10n.text("account.quit", fallback: "終了"),
+                target: self,
+                action: #selector(quitAccount(_:))
+            )
+            quit.identifier = NSUserInterfaceItemIdentifier(account.id.uuidString)
+            quit.bezelStyle = .rounded
+            quit.controlSize = .small
+            header.addArrangedSubview(quit)
+        }
+        stack.addArrangedSubview(header)
+        header.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+
+        let usage = NSStackView()
+        usage.orientation = .vertical
+        usage.alignment = .leading
+        usage.spacing = 2
+        let snapshot = usageByAccountID[account.id]
+        usage.addArrangedSubview(makeUsageLabel(title: "5H", window: snapshot?.primary, resetDateStyle: .timeOnly))
+        usage.addArrangedSubview(makeUsageLabel(title: L10n.text("usage.weekly", fallback: "週間"), window: snapshot?.secondary, resetDateStyle: .monthDayAndTime))
+        if let credits = snapshot?.rateLimitResetCredits {
+            if credits.availableCount > 0 {
+                usage.addArrangedSubview(
+                    makeResetCreditDisclosure(
+                        accountID: account.id,
+                        summary: credits,
+                        isExpanded: expandedMenuBarResetCreditAccountIDs.contains(account.id),
+                        action: #selector(toggleMenuBarResetCredits(_:))
+                    )
+                )
+            } else if let countLabel = makeResetCreditLabels(credits).first {
+                usage.addArrangedSubview(countLabel)
+            }
+        } else {
+            let unavailable = NSTextField(labelWithString: L10n.text("usage.reset-credits.unavailable", fallback: "上限リセット —"))
+            unavailable.font = .systemFont(ofSize: 11)
+            unavailable.textColor = .tertiaryLabelColor
+            usage.addArrangedSubview(unavailable)
+        }
+        stack.addArrangedSubview(usage)
+        usage.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+
+        let updatedAt = usageLastUpdatedAt[account.id].map { formatFetchDate($0) }
+            ?? L10n.text("common.unknown", fallback: "不明")
+        let updated = NSTextField(labelWithString: L10n.text(
+            "usage.last-updated",
+            fallback: "最終確認: {date}",
+            replacing: ["date": updatedAt]
+        ))
+        updated.font = .systemFont(ofSize: 10)
+        updated.textColor = .tertiaryLabelColor
+        stack.addArrangedSubview(updated)
+        if case .loading = usageFetchStates[account.id] {
+            let loading = NSTextField(labelWithString: L10n.text(
+                "usage.fetching",
+                fallback: "（確認中…）"
+            ))
+            loading.font = .systemFont(ofSize: 10)
+            loading.textColor = .secondaryLabelColor
+            stack.addArrangedSubview(loading)
+        }
+        if case .failed = usageFetchStates[account.id] {
+            let failed = NSTextField(labelWithString: L10n.text(
+                "usage.fetch-failed",
+                fallback: "（確認に失敗）"
+            ))
+            failed.font = .systemFont(ofSize: 10, weight: .medium)
+            failed.textColor = .systemOrange
+            stack.addArrangedSubview(failed)
+        }
+        return card
+    }
+
+    @objc
+    private func refreshUsageFromStatus(_ sender: NSButton) {
+        refreshUsage()
+    }
+
+    @objc
+    private func showMainWindowFromStatus(_ sender: NSButton) {
+        statusPopover?.performClose(nil)
+        showMainWindow()
+    }
+
+    @objc
+    private func toggleMenuBarFavorite(_ sender: NSButton) {
+        guard let accountID = accountID(from: sender),
+              let account = launcher.accounts.first(where: { $0.id == accountID }) else { return }
+        do {
+            try launcher.setAccountFavorite(id: accountID, isFavorite: !account.isFavorite)
+            refreshUI()
+            updateStatusPopover()
+        } catch { presentError(error) }
+    }
+
+    @objc
+    private func toggleMenuBarVisibility(_ sender: NSMenuItem) {
+        guard let accountID = accountID(from: sender),
+              let account = launcher.accounts.first(where: { $0.id == accountID }) else { return }
+        do {
+            try launcher.setAccountMenuBarVisibility(id: accountID, isVisible: !account.showsInMenuBar)
+            refreshUI()
+            updateStatusPopover()
+        } catch { presentError(error) }
+    }
+
+    @objc
+    private func toggleMenuBarVisibilityFromSettings(_ sender: NSButton) {
+        guard let accountID = accountID(from: sender),
+              let account = launcher.accounts.first(where: { $0.id == accountID }) else { return }
+        do {
+            try launcher.setAccountMenuBarVisibility(id: accountID, isVisible: !account.showsInMenuBar)
+            refreshUI()
+            updateStatusPopover()
+        } catch { presentError(error) }
+    }
+
+    @objc
+    private func toggleMenuBarFavoriteFromMenu(_ sender: NSMenuItem) {
+        guard let accountID = accountID(from: sender),
+              let account = launcher.accounts.first(where: { $0.id == accountID }) else { return }
+        do {
+            try launcher.setAccountFavorite(id: accountID, isFavorite: !account.isFavorite)
+            refreshUI()
+            updateStatusPopover()
+        } catch { presentError(error) }
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         configureMainMenu()
         configureWindow()
+        configureStatusItem()
+        startUsageRefreshTimer()
         refreshUI()
         refreshUsage()
         let workspaceNotifications = NSWorkspace.shared.notificationCenter
@@ -165,10 +646,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             name: NSWorkspace.didTerminateApplicationNotification,
             object: nil
         )
-        showMainWindow()
+        workspaceNotifications.addObserver(
+            self,
+            selector: #selector(systemDidWake(_:)),
+            name: NSWorkspace.didWakeNotification,
+            object: nil
+        )
+        // SMAppService launches the app in the background at login. Keep the
+        // menu bar item available without surfacing the main window in that
+        // case; an interactive launch remains unchanged.
+        launchedInBackground = SMAppService.mainApp.status == .enabled
+            && !NSApp.isActive
+            && !launcher.accounts.isEmpty
+        if !launchedInBackground {
+            showMainWindow()
+        } else {
+            // A user launch can briefly report inactive while LaunchServices
+            // finishes activation. Give it one run-loop turn before treating
+            // it as a login-item launch.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+                guard let self, self.launchedInBackground, NSApp.isActive else { return }
+                self.launchedInBackground = false
+                self.showMainWindow()
+                self.prepareInitialExperience()
+            }
+        }
 
         DispatchQueue.main.async { [weak self] in
-            self?.prepareInitialExperience()
+            guard let self, !self.launchedInBackground else { return }
+            self.prepareInitialExperience()
         }
     }
 
@@ -184,6 +690,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         if !diagnosticsExecutionState.continuesAfterWindowClose {
             diagnosticsTask?.cancel()
         }
+        usageRefreshTimer?.invalidate()
+        usageRefreshTimer = nil
+        statusPopover?.performClose(nil)
+        if let statusItem {
+            NSStatusBar.system.removeStatusItem(statusItem)
+        }
+        statusItem = nil
         NSWorkspace.shared.notificationCenter.removeObserver(self)
     }
 
@@ -232,7 +745,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     func applicationShouldTerminateAfterLastWindowClosed(
         _ sender: NSApplication
     ) -> Bool {
-        !isRebuildingInterface
+        false
     }
 
     func applicationShouldHandleReopen(
@@ -522,7 +1035,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         let settingsButton = NSButton(
             title: L10n.text("management.settings", fallback: "設定"),
             target: self,
-            action: #selector(showSettings)
+            action: #selector(showSettingsFromButton(_:))
         )
         settingsButton.bezelStyle = .rounded
         settingsButton.controlSize = .regular
@@ -643,6 +1156,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         tableView?.reloadData()
         updateTableHeight(accountCount: accounts.count)
         updateControlAvailability()
+        updateStatusItem()
     }
 
     private func showTransientStatus(_ message: String) {
@@ -663,7 +1177,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         guard !accountHomes.isEmpty else {
             usageByAccountID = [:]
             usageFetchStates = [:]
+            usageLastUpdatedAt = [:]
+            lastUsageRefreshAt = Date()
             scheduleUsageResetNotifications(for: [])
+            updateStatusItem()
+            updateStatusPopover()
             return
         }
 
@@ -688,21 +1206,101 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
 
             guard !Task.isCancelled else { return }
             let finishedAt = Date()
-            self?.usageByAccountID = snapshots
-            self?.usageFetchStates = Dictionary(uniqueKeysWithValues: accountHomes.map { accountID, _ in
-                (accountID, snapshots[accountID] == nil ? .failed(finishedAt) : .loaded(finishedAt))
+            guard let self else { return }
+            let oldSnapshots = self.usageByAccountID
+            let accountIDs = Set(accountHomes.map(\.accountID))
+            let merged = UsageRefreshMerger.merge(
+                previousSnapshots: oldSnapshots,
+                previousLastUpdatedAt: self.usageLastUpdatedAt,
+                fetchedSnapshots: snapshots,
+                accountIDs: accountIDs,
+                finishedAt: finishedAt
+            )
+            self.usageByAccountID = merged.snapshots
+            self.usageLastUpdatedAt = merged.lastUpdatedAt
+            self.lastUsageRefreshAt = finishedAt
+            self.usageFetchStates = Dictionary(uniqueKeysWithValues: accountHomes.map { accountID, _ in
+                (accountID, snapshots[accountID] == nil
+                    ? .failed(self.usageLastUpdatedAt[accountID])
+                    : .loaded(finishedAt))
             })
-            self?.scheduleUsageResetNotifications(
+            self.evaluateUsageThresholdNotifications(previous: oldSnapshots, refreshed: snapshots)
+            self.scheduleUsageResetNotifications(
                 for: accountHomes.compactMap { accountID, _ in
-                    guard let snapshot = snapshots[accountID],
-                          let account = self?.launcher.accounts.first(where: { $0.id == accountID }) else {
+                    guard let snapshot = self.usageByAccountID[accountID],
+                          let account = self.launcher.accounts.first(where: { $0.id == accountID }) else {
                         return nil
                     }
                     return (account, snapshot)
                 }
             )
-            self?.tableView?.reloadData()
-            self?.updateTableHeight(accountCount: self?.launcher.accounts.count ?? 0)
+            self.tableView?.reloadData()
+            self.updateTableHeight(accountCount: self.launcher.accounts.count)
+            self.updateStatusItem()
+            if self.statusPopover?.isShown == true {
+                self.updateStatusPopover()
+            }
+        }
+    }
+
+    private func evaluateUsageThresholdNotifications(
+        previous: [UUID: AccountUsageSnapshot],
+        refreshed: [UUID: AccountUsageSnapshot]
+    ) {
+        let center = UNUserNotificationCenter.current()
+        var notifications: [(String, String)] = []
+        for (accountID, snapshot) in refreshed {
+            guard let account = launcher.accounts.first(where: { $0.id == accountID }) else { continue }
+            let old = previous[accountID]
+            let windows: [(String, String, UsageWindow?, UsageWindow?)] = [
+                ("5H", "primary", old?.primary, snapshot.primary),
+                (L10n.text("usage.weekly", fallback: "週間"), "secondary", old?.secondary, snapshot.secondary)
+            ]
+            for (displayName, key, oldWindow, newWindow) in windows {
+                guard let newWindow else { continue }
+                let thresholds: [(Int, Bool)] = [(10, usageCriticalNotificationsEnabled), (25, usageWarningNotificationsEnabled)]
+                let crossedThresholds = UsageThresholdEvaluator.crossedThresholds(
+                    previous: oldWindow,
+                    current: newWindow,
+                    thresholds: thresholds.map(\.0)
+                )
+                for (threshold, enabled) in thresholds where enabled && crossedThresholds.contains(threshold) {
+                    let notificationKey = "\(accountID.uuidString)-\(key)-\(threshold)"
+                    if newWindow.remainingPercent > threshold {
+                        notifiedUsageThresholds.remove(notificationKey)
+                        continue
+                    }
+                    guard !notifiedUsageThresholds.contains(notificationKey) else { continue }
+                    notifiedUsageThresholds.insert(notificationKey)
+                    let level = threshold == 10
+                        ? L10n.text("usage.threshold.critical", fallback: "危険")
+                        : L10n.text("usage.threshold.warning", fallback: "注意")
+                    notifications.append((
+                        L10n.text("usage.threshold.title", fallback: "利用上限の{level}", replacing: ["level": level]),
+                        L10n.text(
+                            "usage.threshold.body",
+                            fallback: "{name}の{window}は残り{remaining}%です。",
+                            replacing: ["name": account.name, "window": displayName, "remaining": "\(newWindow.remainingPercent)"]
+                        )
+                    ))
+                }
+            }
+        }
+        guard !notifications.isEmpty else { return }
+        Task { @MainActor in
+            let granted = (try? await center.requestAuthorization(options: [.alert, .sound])) ?? false
+            guard granted else { return }
+            for (title, body) in notifications {
+                let content = UNMutableNotificationContent()
+                content.title = title
+                content.body = body
+                content.sound = .default
+                try? await center.add(UNNotificationRequest(
+                    identifier: "usage-threshold-\(UUID().uuidString)",
+                    content: content,
+                    trigger: nil
+                ))
+            }
         }
     }
 
@@ -808,7 +1406,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         addButton?.isEnabled = !isLaunching
         tableView?.isEnabled = !isLaunching
         revealButton?.isEnabled = !isLaunching
-        settingsButton?.isEnabled = !isLaunching
+        // Settings is read-only while a profile is launching, so keep it
+        // available even when the profile table is temporarily locked.
         usageRefreshButton?.isEnabled = !isLaunching
     }
 
@@ -1433,7 +2032,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         labels.append(titleLabel)
 
         if let credits = summary.credits, !credits.isEmpty {
-            for credit in credits {
+            for credit in summary.creditsSortedByExpiry {
                 let expiryText = credit.expiresAt.map {
                     formatResetDate($0, style: .monthDayAndTime)
                 } ?? L10n.text(
@@ -1486,18 +2085,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
 
     private func makeResetCreditDisclosure(
         accountID: UUID,
-        summary: RateLimitResetCreditsSummary
+        summary: RateLimitResetCreditsSummary,
+        isExpanded: Bool? = nil,
+        action: Selector = #selector(toggleResetCredits(_:))
     ) -> NSView {
         let labels = makeResetCreditLabels(summary)
         guard let titleLabel = labels.first else {
             return NSView()
         }
 
-        let isExpanded = expandedResetCreditAccountIDs.contains(accountID)
+        let isExpanded = isExpanded ?? expandedResetCreditAccountIDs.contains(accountID)
         let disclosureButton = NSButton(
             title: titleLabel.stringValue,
             target: self,
-            action: #selector(toggleResetCredits(_:))
+            action: action
         )
         disclosureButton.bezelStyle = .inline
         disclosureButton.controlSize = .small
@@ -1678,6 +2279,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     }
 
     @objc
+    private func toggleMenuBarResetCredits(_ sender: NSButton) {
+        guard let accountID = accountID(from: sender) else { return }
+        if expandedMenuBarResetCreditAccountIDs.contains(accountID) {
+            expandedMenuBarResetCreditAccountIDs.remove(accountID)
+        } else {
+            expandedMenuBarResetCreditAccountIDs.insert(accountID)
+        }
+        updateStatusPopover()
+    }
+
+    @objc
     private func showProfileMenu(_ sender: NSButton) {
         guard let accountID = accountID(from: sender),
               let account = launcher.accounts.first(where: { $0.id == accountID }) else {
@@ -1708,6 +2320,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                 enabled: !isLaunching
             )
         }
+
+        addItem(
+            account.showsInMenuBar
+                ? L10n.text("profile.menu.hide-menubar", fallback: "メニューバーから隠す")
+                : L10n.text("profile.menu.show-menubar", fallback: "メニューバーに表示"),
+            action: #selector(toggleMenuBarVisibility(_:))
+        )
+        addItem(
+            account.isFavorite
+                ? L10n.text("profile.menu.unfavorite", fallback: "お気に入りを解除")
+                : L10n.text("profile.menu.favorite", fallback: "お気に入りにする"),
+            action: #selector(toggleMenuBarFavoriteFromMenu(_:))
+        )
 
         if let storageURL = profileStorageURL(for: account) {
             if !menu.items.isEmpty {
@@ -2699,9 +3324,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             return
         }
 
+        let visibleFrame = NSScreen.main?.visibleFrame
+            ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let settingsHeight = min(860, max(520, visibleFrame.height - 80))
         let settingsWindow = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 560, height: 520),
-            styleMask: [.titled, .closable],
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: settingsHeight),
+            styleMask: [.titled, .closable, .resizable],
             backing: .buffered,
             defer: false
         )
@@ -2710,6 +3338,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             fallback: "設定"
         )
         settingsWindow.tabbingMode = .disallowed
+        settingsWindow.minSize = NSSize(width: 560, height: 520)
         settingsWindow.isReleasedWhenClosed = false
         settingsWindow.center()
         settingsWindow.delegate = self
@@ -2915,6 +3544,112 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         rootStack.addArrangedSubview(notificationsCard)
         notificationsCard.widthAnchor.constraint(equalTo: rootStack.widthAnchor).isActive = true
 
+        let menuBarCard = ProfileCardView()
+        menuBarCard.translatesAutoresizingMaskIntoConstraints = false
+        let menuBarStack = NSStackView()
+        menuBarStack.orientation = .vertical
+        menuBarStack.alignment = .leading
+        menuBarStack.spacing = 8
+        menuBarStack.translatesAutoresizingMaskIntoConstraints = false
+        menuBarCard.addSubview(menuBarStack)
+        NSLayoutConstraint.activate([
+            menuBarStack.leadingAnchor.constraint(equalTo: menuBarCard.leadingAnchor, constant: 16),
+            menuBarStack.trailingAnchor.constraint(equalTo: menuBarCard.trailingAnchor, constant: -16),
+            menuBarStack.topAnchor.constraint(equalTo: menuBarCard.topAnchor, constant: 14),
+            menuBarStack.bottomAnchor.constraint(equalTo: menuBarCard.bottomAnchor, constant: -14)
+        ])
+        let menuBarTitle = NSTextField(labelWithString: L10n.text(
+            "settings.menubar.title",
+            fallback: "メニューバー"
+        ))
+        menuBarTitle.font = .systemFont(ofSize: 13, weight: .semibold)
+        menuBarStack.addArrangedSubview(menuBarTitle)
+        let loginItemCheckbox = NSButton(
+            checkboxWithTitle: L10n.text(
+                "settings.menubar.login-item",
+                fallback: "ログイン時に起動"
+            ),
+            target: nil,
+            action: nil
+        )
+        loginItemCheckbox.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        menuBarStack.addArrangedSubview(loginItemCheckbox)
+        let compactCheckbox = NSButton(
+            checkboxWithTitle: L10n.text(
+                "settings.menubar.compact",
+                fallback: "メニューバーに残量を表示（最小値）"
+            ),
+            target: nil,
+            action: nil
+        )
+        compactCheckbox.state = compactUsageStatusEnabled ? .on : .off
+        menuBarStack.addArrangedSubview(compactCheckbox)
+        let warningCheckbox = NSButton(
+            checkboxWithTitle: L10n.text(
+                "settings.menubar.warning",
+                fallback: "残量25%以下で通知"
+            ),
+            target: nil,
+            action: nil
+        )
+        warningCheckbox.state = usageWarningNotificationsEnabled ? .on : .off
+        menuBarStack.addArrangedSubview(warningCheckbox)
+        let criticalCheckbox = NSButton(
+            checkboxWithTitle: L10n.text(
+                "settings.menubar.critical",
+                fallback: "残量10%以下で通知"
+            ),
+            target: nil,
+            action: nil
+        )
+        criticalCheckbox.state = usageCriticalNotificationsEnabled ? .on : .off
+        menuBarStack.addArrangedSubview(criticalCheckbox)
+        let profileVisibilityTitle = NSTextField(labelWithString: L10n.text(
+            "settings.menubar.profiles-title",
+            fallback: "表示するプロファイル"
+        ))
+        profileVisibilityTitle.font = .systemFont(ofSize: 12, weight: .medium)
+        menuBarStack.addArrangedSubview(profileVisibilityTitle)
+        for account in launcher.accounts {
+            let row = NSStackView()
+            row.orientation = .horizontal
+            row.alignment = .centerY
+            row.spacing = 8
+            let checkbox = NSButton(
+                checkboxWithTitle: account.name,
+                target: self,
+                action: #selector(toggleMenuBarVisibilityFromSettings(_:))
+            )
+            checkbox.identifier = NSUserInterfaceItemIdentifier(account.id.uuidString)
+            checkbox.state = account.showsInMenuBar ? .on : .off
+            row.addArrangedSubview(checkbox)
+            row.addArrangedSubview(NSView())
+            let favorite = NSButton(
+                image: NSImage(systemSymbolName: account.isFavorite ? "star.fill" : "star", accessibilityDescription: nil) ?? NSImage(),
+                target: self,
+                action: #selector(toggleMenuBarFavorite(_:))
+            )
+            favorite.isBordered = false
+            favorite.identifier = NSUserInterfaceItemIdentifier(account.id.uuidString)
+            favorite.toolTip = L10n.text("menubar.favorite", fallback: "お気に入りを切り替え")
+            favorite.setAccessibilityLabel(favorite.toolTip!)
+            row.addArrangedSubview(favorite)
+            menuBarStack.addArrangedSubview(row)
+        }
+        let menuBarDescription = NSTextField(
+            wrappingLabelWithString: L10n.text(
+                "settings.menubar.description",
+                fallback: "アプリを閉じてもメニューバーに残り、表示中プロファイルの利用状況を確認できます。ログイン時起動と通知は個別に許可を求めます。"
+            )
+        )
+        menuBarDescription.font = .systemFont(ofSize: 12)
+        menuBarDescription.textColor = .secondaryLabelColor
+        menuBarDescription.maximumNumberOfLines = 4
+        menuBarStack.addArrangedSubview(menuBarDescription)
+        menuBarDescription.widthAnchor.constraint(equalTo: menuBarStack.widthAnchor).isActive = true
+        rootStack.addArrangedSubview(menuBarCard)
+        menuBarCard.widthAnchor.constraint(equalTo: rootStack.widthAnchor).isActive = true
+
         let healthCard = ProfileCardView()
         healthCard.translatesAutoresizingMaskIntoConstraints = false
         let healthStack = NSStackView()
@@ -2991,12 +3726,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         self.settingsWindow = settingsWindow
         settingsLanguagePopup = languagePopup
         settingsUsageNotificationCheckbox = notificationsCheckbox
+        settingsLoginItemCheckbox = loginItemCheckbox
+        settingsCompactUsageCheckbox = compactCheckbox
+        settingsUsageWarningCheckbox = warningCheckbox
+        settingsUsageCriticalCheckbox = criticalCheckbox
         settingsProfileHealthLabel = profileHealthRow.label
         settingsProfileRestoreButton = profileHealthRow.button
         settingsSettingsHealthLabel = settingsHealthRow.label
         settingsSettingsRestoreButton = settingsHealthRow.button
         settingsWindow.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @objc
+    private func showSettingsFromButton(_ sender: NSButton) {
+        showSettings()
     }
 
     @objc
@@ -3331,6 +4075,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             settingsUsageNotificationCheckbox?.state == .on,
             forKey: usageNotificationsEnabledKey
         )
+        UserDefaults.standard.set(
+            settingsUsageWarningCheckbox?.state == .on,
+            forKey: usageWarningNotificationsEnabledKey
+        )
+        UserDefaults.standard.set(
+            settingsUsageCriticalCheckbox?.state == .on,
+            forKey: usageCriticalNotificationsEnabledKey
+        )
+        UserDefaults.standard.set(
+            settingsCompactUsageCheckbox?.state == .on,
+            forKey: compactUsageStatusEnabledKey
+        )
+        let wantsLoginItem = settingsLoginItemCheckbox?.state == .on
+        let loginItemIsEnabled = SMAppService.mainApp.status == .enabled
+        if wantsLoginItem != loginItemIsEnabled {
+            do {
+                if wantsLoginItem {
+                    try SMAppService.mainApp.register()
+                } else {
+                    try SMAppService.mainApp.unregister()
+                }
+            } catch {
+                presentWarning(
+                    error.localizedDescription,
+                    title: L10n.text(
+                        "settings.menubar.login-item-error",
+                        fallback: "ログイン時起動を変更できませんでした"
+                    )
+                )
+            }
+        }
         scheduleUsageResetNotifications(
             for: launcher.accounts.compactMap { account in
                 guard let snapshot = usageByAccountID[account.id] else { return nil }
@@ -3350,6 +4125,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             }
         }
 
+        updateStatusItem()
+        if statusPopover?.isShown == true {
+            updateStatusPopover()
+        }
+
         showTransientStatus(
             L10n.text(
                 "settings.applied",
@@ -3363,34 +4143,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             return
         }
 
+        // Do not move a live view hierarchy between NSWindow instances. The
+        // old implementation transferred the replacement window's
+        // contentView and then closed that window. AppKit can still have
+        // deferred layout/accessibility work queued for the original window,
+        // which leaves Objective-C objects released during the next
+        // autorelease-pool drain (EXC_BAD_ACCESS after changing language).
+        // Rebuild into a fresh window instead and let the old window drain
+        // independently.
+        guideWindow?.delegate = nil
         guideWindow?.performClose(nil)
         guideWindow = nil
         guidePages = []
 
+        let frame = currentWindow.frame
+        let wasVisible = currentWindow.isVisible
+        currentWindow.delegate = nil
+        currentWindow.close()
         window = nil
         configureMainMenu()
         configureWindow()
-        guard
-            let replacementWindow = window,
-            let replacementContentView = replacementWindow.contentView
-        else {
-            window = currentWindow
+        guard let replacementWindow = window else {
             return
         }
-
-        replacementWindow.contentView = nil
-        currentWindow.contentView = replacementContentView
-        currentWindow.title = replacementWindow.title
-        currentWindow.minSize = replacementWindow.minSize
-        currentWindow.delegate = self
-        window = currentWindow
-
-        replacementWindow.isReleasedWhenClosed = true
-        replacementWindow.close()
+        replacementWindow.setFrame(frame, display: false)
 
         refreshUI()
         refreshUsage()
-        showMainWindow()
+        if wasVisible {
+            showMainWindow()
+        }
     }
 
     @objc

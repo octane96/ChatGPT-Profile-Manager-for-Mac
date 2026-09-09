@@ -288,8 +288,28 @@ struct ProfileStateStore {
             profileID: profileID,
             directoryName: currentAccounts[index].directoryName,
             lastKnownPath: currentAccounts[index].lastKnownPath,
-            bookmarkData: currentAccounts[index].bookmarkData
+            bookmarkData: currentAccounts[index].bookmarkData,
+            isFavorite: currentAccounts[index].isFavorite,
+            showsInMenuBar: currentAccounts[index].showsInMenuBar
         )
+        try saveAccounts(currentAccounts)
+    }
+
+    func setAccountMenuBarVisibility(id: UUID, isVisible: Bool) throws {
+        var currentAccounts = accounts
+        guard let index = currentAccounts.firstIndex(where: { $0.id == id }) else {
+            throw ProfileManagerError.accountNotFound
+        }
+        currentAccounts[index].showsInMenuBar = isVisible
+        try saveAccounts(currentAccounts)
+    }
+
+    func setAccountFavorite(id: UUID, isFavorite: Bool) throws {
+        var currentAccounts = accounts
+        guard let index = currentAccounts.firstIndex(where: { $0.id == id }) else {
+            throw ProfileManagerError.accountNotFound
+        }
+        currentAccounts[index].isFavorite = isFavorite
         try saveAccounts(currentAccounts)
     }
 

@@ -91,6 +91,14 @@ final class CodexLauncher {
         stateStore.accounts
     }
 
+    func setAccountMenuBarVisibility(id: UUID, isVisible: Bool) throws {
+        try stateStore.setAccountMenuBarVisibility(id: id, isVisible: isVisible)
+    }
+
+    func setAccountFavorite(id: UUID, isFavorite: Bool) throws {
+        try stateStore.setAccountFavorite(id: id, isFavorite: isFavorite)
+    }
+
     var lastLaunchedAccount: AccountProfile? {
         guard let id = stateStore.lastLaunchedAccountID else {
             return nil

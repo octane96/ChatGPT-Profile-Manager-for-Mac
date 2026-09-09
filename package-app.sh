@@ -42,6 +42,8 @@ cp "$PROJECT_DIR/Resources/Info.plist" "$APP_BUNDLE/Contents/Info.plist"
 cp "$PROJECT_DIR/Resources/PkgInfo" "$APP_BUNDLE/Contents/PkgInfo"
 cp "$PROJECT_DIR/Resources/AppIcon.icns" \
   "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
+cp "$PROJECT_DIR/Resources/MenuBarIconTemplate.png" \
+  "$APP_BUNDLE/Contents/Resources/MenuBarIconTemplate.png"
 cp -R "$PROJECT_DIR/Resources/en.lproj" \
   "$APP_BUNDLE/Contents/Resources/en.lproj"
 
