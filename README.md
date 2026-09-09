@@ -4,7 +4,7 @@ ChatGPTデスクトップアプリのローカル環境を、プロファイル�
 
 ChatGPT Profile Manager is a macOS app for managing separate local environments for the ChatGPT desktop app. Each profile can keep its own sign-in state, chats, projects, and Codex data so that multiple ChatGPT accounts can be used independently.
 
-**バージョン / Version:** 1.0.0（macOS 14以降 / macOS 14 or later）
+**バージョン / Version:** 1.1.0（macOS 14以降 / macOS 14 or later）
 
 > **非公式アプリ / Unofficial app**
 > OpenAIまたはChatGPTの公式製品ではありません。OpenAIの名称・ロゴなど第三者の商標・素材は、このリポジトリのMIT Licenseの対象外です。
