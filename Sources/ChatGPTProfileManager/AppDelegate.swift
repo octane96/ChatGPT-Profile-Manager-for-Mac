@@ -822,8 +822,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             return true
         }
 
-        window.orderOut(nil)
+        hideMainWindow(window)
         return false
+    }
+
+    @objc
+    private func hideMainWindow(_ sender: Any?) {
+        window?.orderOut(nil)
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -910,11 +915,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         let windowMenu = NSMenu(
             title: L10n.text("menu.window", fallback: "ウィンドウ")
         )
-        windowMenu.addItem(
-            withTitle: L10n.text("menu.window.close", fallback: "ウィンドウを閉じる"),
-            action: #selector(NSWindow.performClose(_:)),
+        let hideMainWindowItem = NSMenuItem(
+            title: L10n.text("menu.window.close", fallback: "ウィンドウを閉じる"),
+            action: #selector(hideMainWindow(_:)),
             keyEquivalent: "w"
         )
+        hideMainWindowItem.target = self
+        windowMenu.addItem(hideMainWindowItem)
         windowMenu.addItem(
             withTitle: L10n.text("menu.window.minimize", fallback: "しまう"),
             action: #selector(NSWindow.performMiniaturize(_:)),
