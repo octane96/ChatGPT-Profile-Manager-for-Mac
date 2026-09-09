@@ -121,6 +121,40 @@ final class ChatGPTProfileManagerTests: XCTestCase {
         XCTAssertFalse(reloaded.showsInMenuBar)
     }
 
+    @MainActor
+    func testMenuBarFavoriteButtonPresentationTracksToggledState() {
+        let button = NSButton()
+
+        MenuBarFavoriteButtonPresentation.update(button, isFavorite: false)
+        XCTAssertEqual(
+            MenuBarFavoriteButtonPresentation.symbolName(isFavorite: false),
+            "star"
+        )
+        XCTAssertEqual(
+            button.toolTip,
+            L10n.text("profile.menu.favorite", fallback: "お気に入りにする")
+        )
+
+        MenuBarFavoriteButtonPresentation.update(button, isFavorite: true)
+        XCTAssertEqual(
+            MenuBarFavoriteButtonPresentation.symbolName(isFavorite: true),
+            "star.fill"
+        )
+        XCTAssertEqual(
+            button.toolTip,
+            L10n.text("profile.menu.unfavorite", fallback: "お気に入りを解除")
+        )
+    }
+
+    @MainActor
+    func testApplicationStaysAliveAfterLastWindowCloses() {
+        let delegate = AppDelegate()
+
+        XCTAssertFalse(
+            delegate.applicationShouldTerminateAfterLastWindowClosed(NSApplication.shared)
+        )
+    }
+
     func testMenuBarUsageSummaryUsesMinimumVisibleValuesAndTwoLineLabels() throws {
         let firstID = UUID()
         let secondID = UUID()
@@ -153,6 +187,16 @@ final class ChatGPTProfileManagerTests: XCTestCase {
         XCTAssertTrue(MenuBarPreferences.compactUsageEnabled(in: defaults))
         defaults.set(false, forKey: MenuBarPreferences.compactUsageStatusKey)
         XCTAssertFalse(MenuBarPreferences.compactUsageEnabled(in: defaults))
+    }
+
+    func testMenuBarStatusItemVisibilityDefaultsToEnabledAndSupportsOptOut() throws {
+        let suiteName = "ChatGPTProfileManagerMenuBarVisibilityTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        XCTAssertTrue(MenuBarPreferences.statusItemEnabled(in: defaults))
+        defaults.set(false, forKey: MenuBarPreferences.statusItemEnabledKey)
+        XCTAssertFalse(MenuBarPreferences.statusItemEnabled(in: defaults))
     }
 
     func testUsageRefreshMergeRetainsStaleValuesForPartialFailures() throws {
