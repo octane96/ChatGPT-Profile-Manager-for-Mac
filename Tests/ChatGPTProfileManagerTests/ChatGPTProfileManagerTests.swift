@@ -1,9 +1,19 @@
 import Foundation
+import AppKit
 import SQLite3
 import XCTest
 @testable import ChatGPTProfileManager
 
 final class ChatGPTProfileManagerTests: XCTestCase {
+    func testMenuBarIconIsMonochromeBrandMarkSizedForStatusItem() {
+        let icon = MenuBarIcon.make()
+
+        XCTAssertTrue(icon.isTemplate)
+        XCTAssertEqual(icon.size.width, 18, accuracy: 0.01)
+        XCTAssertEqual(icon.size.height, 18, accuracy: 0.01)
+        XCTAssertFalse(icon.representations.isEmpty)
+    }
+
     func testLanguageResolutionUsesJapaneseOnlyWhenItIsThePrimaryMacLanguage() {
         XCTAssertEqual(
             AppLanguage.resolve(preferredLanguages: ["ja-JP", "en-US"]),
@@ -86,6 +96,94 @@ final class ChatGPTProfileManagerTests: XCTestCase {
         XCTAssertEqual(account.id, id)
         XCTAssertEqual(account.profileID, id)
         XCTAssertNil(account.lastKnownPath)
+        XCTAssertFalse(account.isFavorite)
+        XCTAssertTrue(account.showsInMenuBar)
+    }
+
+    func testMenuBarPreferencesPersistWithAccountRegistry() throws {
+        let suiteName = "ChatGPTProfileManagerMenuBarTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        var store = ProfileStateStore(defaults: defaults)
+        let account = try store.addAccount(named: "Work", linkToExistingEnvironment: false)
+        try store.setAccountFavorite(id: account.id, isFavorite: true)
+        try store.setAccountMenuBarVisibility(id: account.id, isVisible: false)
+
+        let saved = try XCTUnwrap(store.account(id: account.id))
+        XCTAssertTrue(saved.isFavorite)
+        XCTAssertFalse(saved.showsInMenuBar)
+
+        // A newly initialized store reads the same persisted flags.
+        store = ProfileStateStore(defaults: defaults)
+        let reloaded = try XCTUnwrap(store.account(id: account.id))
+        XCTAssertTrue(reloaded.isFavorite)
+        XCTAssertFalse(reloaded.showsInMenuBar)
+    }
+
+    func testMenuBarUsageSummaryUsesMinimumVisibleValuesAndTwoLineLabels() throws {
+        let firstID = UUID()
+        let secondID = UUID()
+        let first = try XCTUnwrap(AccountUsageSnapshot(
+            primary: UsageWindow(usedPercent: 20, windowDurationMinutes: 300, resetsAt: nil),
+            secondary: UsageWindow(usedPercent: 40, windowDurationMinutes: 10080, resetsAt: nil)
+        ))
+        let second = try XCTUnwrap(AccountUsageSnapshot(
+            primary: UsageWindow(usedPercent: 65, windowDurationMinutes: 300, resetsAt: nil),
+            secondary: UsageWindow(usedPercent: 10, windowDurationMinutes: 10080, resetsAt: nil)
+        ))
+
+        let summary = MenuBarUsageSummary.minimum(
+            accountIDs: [firstID, secondID],
+            snapshots: [firstID: first, secondID: second]
+        )
+        XCTAssertEqual(summary.fiveHour, 35)
+        XCTAssertEqual(summary.weekly, 60)
+        XCTAssertEqual(summary.title, "5h 35%\nW 60%")
+
+        let unavailable = MenuBarUsageSummary.minimum(accountIDs: [UUID()], snapshots: [:])
+        XCTAssertEqual(unavailable.title, "—")
+    }
+
+    func testMenuBarUsageDefaultsToCompactTextAndSupportsOptOut() throws {
+        let suiteName = "ChatGPTProfileManagerMenuBarDefaultTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        XCTAssertTrue(MenuBarPreferences.compactUsageEnabled(in: defaults))
+        defaults.set(false, forKey: MenuBarPreferences.compactUsageStatusKey)
+        XCTAssertFalse(MenuBarPreferences.compactUsageEnabled(in: defaults))
+    }
+
+    func testUsageRefreshMergeRetainsStaleValuesForPartialFailures() throws {
+        let retainedID = UUID()
+        let refreshedID = UUID()
+        let removedID = UUID()
+        let oldDate = Date(timeIntervalSince1970: 1_700_000_000)
+        let finishedAt = Date(timeIntervalSince1970: 1_800_000_000)
+        let oldSnapshot = try XCTUnwrap(AccountUsageSnapshot(
+            primary: UsageWindow(usedPercent: 40, windowDurationMinutes: 300, resetsAt: nil),
+            secondary: nil
+        ))
+        let refreshedSnapshot = try XCTUnwrap(AccountUsageSnapshot(
+            primary: UsageWindow(usedPercent: 10, windowDurationMinutes: 300, resetsAt: nil),
+            secondary: nil
+        ))
+
+        let result = UsageRefreshMerger.merge(
+            previousSnapshots: [retainedID: oldSnapshot, removedID: oldSnapshot],
+            previousLastUpdatedAt: [retainedID: oldDate, removedID: oldDate],
+            fetchedSnapshots: [refreshedID: refreshedSnapshot],
+            accountIDs: [retainedID, refreshedID],
+            finishedAt: finishedAt
+        )
+
+        XCTAssertEqual(result.snapshots[retainedID], oldSnapshot)
+        XCTAssertEqual(result.lastUpdatedAt[retainedID], oldDate)
+        XCTAssertEqual(result.snapshots[refreshedID], refreshedSnapshot)
+        XCTAssertEqual(result.lastUpdatedAt[refreshedID], finishedAt)
+        XCTAssertNil(result.snapshots[removedID])
+        XCTAssertNil(result.lastUpdatedAt[removedID])
     }
 
     func testProfileIdentityMarkerRoundTripsWithoutSensitiveFields() throws {
@@ -799,6 +897,83 @@ final class ChatGPTProfileManagerTests: XCTestCase {
         XCTAssertEqual(snapshot.primary?.remainingPercent, 96)
         XCTAssertEqual(snapshot.secondary?.remainingPercent, 92)
         XCTAssertEqual(snapshot.displayPlanName, "Pro")
+    }
+
+    func testResetCreditsSortKnownExpirationsBeforeUnknownDates() {
+        let earliest = Date(timeIntervalSince1970: 1_700_000_000)
+        let latest = Date(timeIntervalSince1970: 1_800_000_000)
+        let summary = RateLimitResetCreditsSummary(
+            availableCount: 4,
+            credits: [
+                RateLimitResetCredit(expiresAt: nil),
+                RateLimitResetCredit(expiresAt: latest),
+                RateLimitResetCredit(expiresAt: earliest),
+                RateLimitResetCredit(expiresAt: nil)
+            ]
+        )
+
+        XCTAssertEqual(
+            summary.creditsSortedByExpiry.map(\.expiresAt),
+            [earliest, latest, nil, nil]
+        )
+    }
+
+    func testUsageSnapshotPreservesZeroCreditsAndUnknownExpiry() throws {
+        let response = Data(
+            #"""
+            {
+              "result": {
+                "rateLimits": { "primary": { "usedPercent": 100 } },
+                "rateLimitResetCredits": {
+                  "availableCount": 0,
+                  "credits": [ { "expiresAt": "not-a-date" } ]
+                }
+              }
+            }
+            """#.utf8
+        )
+
+        let snapshot = try XCTUnwrap(AccountUsageSnapshot(jsonData: response))
+        XCTAssertEqual(snapshot.primary?.remainingPercent, 0)
+        XCTAssertEqual(snapshot.rateLimitResetCredits?.availableCount, 0)
+        XCTAssertEqual(snapshot.rateLimitResetCredits?.credits?.count, 1)
+        XCTAssertNil(snapshot.rateLimitResetCredits?.credits?.first?.expiresAt)
+    }
+
+    func testUsageSnapshotRejectsResponseWithoutUsageOrCredits() {
+        let response = Data(#"{"result":{"rateLimits":{"planType":"plus"}}}"#.utf8)
+        XCTAssertNil(AccountUsageSnapshot(jsonData: response))
+    }
+
+    func testUsageThresholdEvaluatorOnlyReportsDownwardCrossings() {
+        let previous = UsageWindow(usedPercent: 60, windowDurationMinutes: 300, resetsAt: nil)
+        let current = UsageWindow(usedPercent: 95, windowDurationMinutes: 300, resetsAt: nil)
+        XCTAssertEqual(
+            UsageThresholdEvaluator.crossedThresholds(
+                previous: previous,
+                current: current,
+                thresholds: [25, 10]
+            ),
+            [10, 25]
+        )
+
+        let recovered = UsageWindow(usedPercent: 60, windowDurationMinutes: 300, resetsAt: nil)
+        XCTAssertEqual(
+            UsageThresholdEvaluator.crossedThresholds(
+                previous: current,
+                current: recovered,
+                thresholds: [10, 25]
+            ),
+            []
+        )
+        XCTAssertEqual(
+            UsageThresholdEvaluator.crossedThresholds(
+                previous: nil,
+                current: current,
+                thresholds: [10, 25]
+            ),
+            []
+        )
     }
 
     func testExistingEnvironmentLaunchSpecUsesDefaultAppProfile() {

@@ -11,9 +11,11 @@ struct AccountProfile: Codable, Equatable, Identifiable, Sendable {
     let directoryName: String
     var lastKnownPath: String?
     var bookmarkData: Data?
+    var isFavorite: Bool
+    var showsInMenuBar: Bool
 
     private enum CodingKeys: String, CodingKey {
-        case id, profileID, name, directoryName, lastKnownPath, bookmarkData
+        case id, profileID, name, directoryName, lastKnownPath, bookmarkData, isFavorite, showsInMenuBar
     }
 
     init(
@@ -22,7 +24,9 @@ struct AccountProfile: Codable, Equatable, Identifiable, Sendable {
         profileID: UUID? = nil,
         directoryName: String? = nil,
         lastKnownPath: String? = nil,
-        bookmarkData: Data? = nil
+        bookmarkData: Data? = nil,
+        isFavorite: Bool = false,
+        showsInMenuBar: Bool = true
     ) {
         self.id = id
         self.profileID = profileID ?? id
@@ -30,6 +34,8 @@ struct AccountProfile: Codable, Equatable, Identifiable, Sendable {
         self.directoryName = directoryName ?? Self.defaultDirectoryName(name: name, id: id)
         self.lastKnownPath = lastKnownPath
         self.bookmarkData = bookmarkData
+        self.isFavorite = isFavorite
+        self.showsInMenuBar = showsInMenuBar
     }
 
     init(from decoder: Decoder) throws {
@@ -43,6 +49,8 @@ struct AccountProfile: Codable, Equatable, Identifiable, Sendable {
         self.directoryName = try container.decode(String.self, forKey: .directoryName)
         self.lastKnownPath = try container.decodeIfPresent(String.self, forKey: .lastKnownPath)
         self.bookmarkData = try container.decodeIfPresent(Data.self, forKey: .bookmarkData)
+        self.isFavorite = try container.decodeIfPresent(Bool.self, forKey: .isFavorite) ?? false
+        self.showsInMenuBar = try container.decodeIfPresent(Bool.self, forKey: .showsInMenuBar) ?? true
     }
 
     func encode(to encoder: Encoder) throws {
@@ -53,6 +61,8 @@ struct AccountProfile: Codable, Equatable, Identifiable, Sendable {
         try container.encode(directoryName, forKey: .directoryName)
         try container.encodeIfPresent(lastKnownPath, forKey: .lastKnownPath)
         try container.encodeIfPresent(bookmarkData, forKey: .bookmarkData)
+        try container.encode(isFavorite, forKey: .isFavorite)
+        try container.encode(showsInMenuBar, forKey: .showsInMenuBar)
     }
 
     private static func defaultDirectoryName(name: String, id: UUID) -> String {

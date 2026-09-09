@@ -10,9 +10,111 @@ struct UsageWindow: Equatable, Sendable {
     }
 }
 
+struct MenuBarUsageSummary: Equatable, Sendable {
+    let fiveHour: Int?
+    let weekly: Int?
+
+    var title: String {
+        let lines = [
+            fiveHour.map { "5h \($0)%" },
+            weekly.map { "W \($0)%" }
+        ].compactMap { $0 }
+        return lines.isEmpty ? "—" : lines.joined(separator: "\n")
+    }
+
+    static func minimum(
+        accountIDs: [UUID],
+        snapshots: [UUID: AccountUsageSnapshot]
+    ) -> MenuBarUsageSummary {
+        MenuBarUsageSummary(
+            fiveHour: accountIDs.compactMap { snapshots[$0]?.primary?.remainingPercent }.min(),
+            weekly: accountIDs.compactMap { snapshots[$0]?.secondary?.remainingPercent }.min()
+        )
+    }
+}
+
+struct UsageRefreshMergeResult: Equatable, Sendable {
+    let snapshots: [UUID: AccountUsageSnapshot]
+    let lastUpdatedAt: [UUID: Date]
+}
+
+enum UsageRefreshMerger {
+    /// Retains the last successful snapshot for accounts whose current fetch
+    /// failed, while dropping registrations that no longer exist.
+    static func merge(
+        previousSnapshots: [UUID: AccountUsageSnapshot],
+        previousLastUpdatedAt: [UUID: Date],
+        fetchedSnapshots: [UUID: AccountUsageSnapshot],
+        accountIDs: Set<UUID>,
+        finishedAt: Date
+    ) -> UsageRefreshMergeResult {
+        var snapshots = previousSnapshots.filter { accountIDs.contains($0.key) }
+        var lastUpdatedAt = previousLastUpdatedAt.filter { accountIDs.contains($0.key) }
+        for (accountID, snapshot) in fetchedSnapshots {
+            snapshots[accountID] = snapshot
+            lastUpdatedAt[accountID] = finishedAt
+        }
+        return UsageRefreshMergeResult(
+            snapshots: snapshots,
+            lastUpdatedAt: lastUpdatedAt
+        )
+    }
+}
+
+enum MenuBarPreferences {
+    static let compactUsageStatusKey = "compactUsageStatusEnabled"
+
+    static func compactUsageEnabled(in defaults: UserDefaults) -> Bool {
+        (defaults.object(forKey: compactUsageStatusKey) as? Bool) ?? true
+    }
+}
+
+enum UsageThresholdEvaluator {
+    /// Returns thresholds crossed while remaining usage moved downward.
+    /// Thresholds are intentionally returned in ascending order so callers
+    /// can produce deterministic notifications.
+    static func crossedThresholds(
+        previous: UsageWindow?,
+        current: UsageWindow?,
+        thresholds: [Int]
+    ) -> [Int] {
+        guard let previous, let current else { return [] }
+        return thresholds
+            .filter {
+                previous.remainingPercent > $0
+                    && current.remainingPercent <= $0
+            }
+            .sorted()
+    }
+}
+
 struct RateLimitResetCreditsSummary: Equatable, Sendable {
     let availableCount: Int
     let credits: [RateLimitResetCredit]?
+
+    /// Presents known expirations first in chronological order. Credits with
+    /// no expiry are kept at the end so an incomplete API response never
+    /// changes the meaning of the known dates.
+    var creditsSortedByExpiry: [RateLimitResetCredit] {
+        guard let credits else { return [] }
+        return credits.enumerated()
+            .sorted { left, right in
+                switch (left.element.expiresAt, right.element.expiresAt) {
+                case let (leftDate?, rightDate?):
+                    if leftDate != rightDate {
+                        return leftDate < rightDate
+                    }
+                    return left.offset < right.offset
+                case (_?, nil):
+                    return true
+                case (nil, _?):
+                    return false
+                case (nil, nil):
+                    return left.offset < right.offset
+                }
+            }
+            .map(\.element)
+    }
 }
 
 struct RateLimitResetCredit: Equatable, Sendable {
