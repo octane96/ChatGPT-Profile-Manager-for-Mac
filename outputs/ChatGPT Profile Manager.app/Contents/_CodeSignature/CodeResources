@@ -8,11 +8,15 @@
 		<data>
 		solN2uAMN9WJwa0AFW6WN/6ar2M=
 		</data>
+		<key>Resources/MenuBarIconTemplate.png</key>
+		<data>
+		7v7yLiG1uX6OX4t28zvCjpv0z+4=
+		</data>
 		<key>Resources/en.lproj/Localizable.strings</key>
 		<dict>
 			<key>hash</key>
 			<data>
-			l0TycULCQrXxhOx9ODcbD+CDSjU=
+			WKRuVP8hBrc9wovsmV0oxFifr5c=
 			</data>
 			<key>optional</key>
 			<true/>
@@ -27,11 +31,18 @@
 			chmosBLyRhZDzdX4rrRMM3GB2Xvwp51z2FbRmrafyIo=
 			</data>
 		</dict>
+		<key>Resources/MenuBarIconTemplate.png</key>
+		<dict>
+			<key>hash2</key>
+			<data>
+			yJrm4FiQXsUefVRyDuAUMCQu3p5E0aFWB6yvEwkMEjQ=
+			</data>
+		</dict>
 		<key>Resources/en.lproj/Localizable.strings</key>
 		<dict>
 			<key>hash2</key>
 			<data>
-			8yirfOpS5jzO/pJ3FAsZhxpGZnEaNnY/Smj1pXC+8kQ=
+			hhPhB1luyGxTrW/JfSDjLeGfbgg4ppGvcT0zJhoM1Aw=
 			</data>
 			<key>optional</key>
 			<true/>

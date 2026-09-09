@@ -4,11 +4,11 @@ ChatGPTデスクトップアプリのCodexビューを、複数のChatGPTプロ�
 
 ## 現在のバージョン
 
-**1.0.0**（macOS 14以降）
+**1.1.1**（macOS 14以降）
 
 ## ダウンロード
 
-- [ChatGPT Profile Manager 1.0.0（macOS）](outputs/ChatGPT-Profile-Manager-macOS.zip)
+- [ChatGPT Profile Manager 1.1.1（macOS）](outputs/ChatGPT-Profile-Manager-macOS.zip)
 - [ソースコード](outputs/ChatGPT-Profile-Manager-Source.zip)
 
 ## 主な機能
