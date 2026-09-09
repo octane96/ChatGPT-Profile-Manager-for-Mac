@@ -1785,14 +1785,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         usageRow.alignment = .top
         usageRow.spacing = 18
         usageRow.setContentCompressionResistancePriority(.required, for: .vertical)
+        // Keep the reset-credit disclosure in a stable column across profile
+        // rows, regardless of the length of each profile's usage values.
+        usageStack.translatesAutoresizingMaskIntoConstraints = false
+        usageStack.widthAnchor.constraint(equalToConstant: 250).isActive = true
         usageRow.addArrangedSubview(usageStack)
 
         if let resetCredits = usageSnapshot?.rateLimitResetCredits,
            resetCredits.availableCount > 0 {
-            let usageSpacer = NSView()
-            usageSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-            usageSpacer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-            usageRow.addArrangedSubview(usageSpacer)
             usageRow.addArrangedSubview(
                 makeResetCreditDisclosure(accountID: account.id, summary: resetCredits)
             )
