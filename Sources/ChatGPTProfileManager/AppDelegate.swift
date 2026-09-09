@@ -62,6 +62,32 @@ private final class MenuBarUsageLabel: NSTextField {
     }
 }
 
+enum ApplicationTerminationPolicy {
+    /// Window-based auto-quit utilities can send a quit Apple Event shortly
+    /// after the main window is hidden. In-app quit actions bypass this guard.
+    static let unexpectedQuitSuppressionInterval: TimeInterval = 5
+
+    static func shouldSuppressUnexpectedTermination(
+        explicitTerminationRequested: Bool,
+        menuBarStatusItemEnabled: Bool,
+        mainWindowVisible: Bool,
+        mainWindowHiddenAt: Date?,
+        now: Date = Date()
+    ) -> Bool {
+        guard
+            !explicitTerminationRequested,
+            menuBarStatusItemEnabled,
+            !mainWindowVisible,
+            let mainWindowHiddenAt
+        else {
+            return false
+        }
+
+        let elapsed = now.timeIntervalSince(mainWindowHiddenAt)
+        return elapsed >= 0 && elapsed <= unexpectedQuitSuppressionInterval
+    }
+}
+
 @MainActor
 enum MenuBarFavoriteButtonPresentation {
     static func symbolName(isFavorite: Bool) -> String {
@@ -178,6 +204,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     private var statusPopoverStack: NSStackView?
     private weak var statusUsageLabel: MenuBarUsageLabel?
     private let menuBarIcon = MenuBarIcon.make()
+    private var explicitTerminationRequested = false
+    private var mainWindowHiddenAt: Date?
     private var isTerminating = false
     private var launchedInBackground = false
     private var isLaunching = false {
@@ -470,8 +498,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         footer.addArrangedSubview(NSView())
         let quitButton = NSButton(
             title: L10n.text("menu.quit", fallback: "終了"),
-            target: NSApp,
-            action: #selector(NSApplication.terminate(_:))
+            target: self,
+            action: #selector(requestApplicationTermination(_:))
         )
         quitButton.bezelStyle = .rounded
         quitButton.controlSize = .small
@@ -763,6 +791,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     func applicationShouldTerminate(
         _ sender: NSApplication
     ) -> NSApplication.TerminateReply {
+        if ApplicationTerminationPolicy.shouldSuppressUnexpectedTermination(
+            explicitTerminationRequested: explicitTerminationRequested,
+            menuBarStatusItemEnabled: menuBarStatusItemEnabled,
+            mainWindowVisible: window?.isVisible == true,
+            mainWindowHiddenAt: mainWindowHiddenAt
+        ) {
+            return .terminateCancel
+        }
         guard diagnosticsExecutionState.blocksApplicationTermination else {
             isTerminating = true
             return .terminateNow
@@ -780,6 +816,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         )
         alert.addButton(withTitle: L10n.text("common.ok", fallback: "OK"))
         alert.runModal()
+        explicitTerminationRequested = false
         return .terminateCancel
     }
 
@@ -806,7 +843,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     func applicationShouldTerminateAfterLastWindowClosed(
         _ sender: NSApplication
     ) -> Bool {
-        false
+        return false
     }
 
     func applicationShouldHandleReopen(
@@ -828,7 +865,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
 
     @objc
     private func hideMainWindow(_ sender: Any?) {
+        mainWindowHiddenAt = Date()
         window?.orderOut(nil)
+    }
+
+    @objc
+    private func requestApplicationTermination(_ sender: Any?) {
+        explicitTerminationRequested = true
+        NSApp.terminate(sender)
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -900,14 +944,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             keyEquivalent: ""
         )
         applicationMenu.addItem(.separator())
-        applicationMenu.addItem(
-            withTitle: L10n.text(
+        let quitApplicationItem = NSMenuItem(
+            title: L10n.text(
                 "menu.quit",
                 fallback: "ChatGPT Profile Managerを終了"
             ),
-            action: #selector(NSApplication.terminate(_:)),
+            action: #selector(requestApplicationTermination(_:)),
             keyEquivalent: "q"
         )
+        quitApplicationItem.target = self
+        applicationMenu.addItem(quitApplicationItem)
         applicationMenuItem.submenu = applicationMenu
 
         let windowMenuItem = NSMenuItem()
@@ -1211,6 +1257,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     }
 
     private func showMainWindow() {
+        mainWindowHiddenAt = nil
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }

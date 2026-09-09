@@ -155,6 +155,37 @@ final class ChatGPTProfileManagerTests: XCTestCase {
         )
     }
 
+    func testUnexpectedQuitIsSuppressedImmediatelyAfterMainWindowHides() {
+        let hiddenAt = Date(timeIntervalSince1970: 100)
+
+        XCTAssertTrue(ApplicationTerminationPolicy.shouldSuppressUnexpectedTermination(
+            explicitTerminationRequested: false,
+            menuBarStatusItemEnabled: true,
+            mainWindowVisible: false,
+            mainWindowHiddenAt: hiddenAt,
+            now: hiddenAt.addingTimeInterval(2)
+        ))
+        XCTAssertFalse(ApplicationTerminationPolicy.shouldSuppressUnexpectedTermination(
+            explicitTerminationRequested: false,
+            menuBarStatusItemEnabled: true,
+            mainWindowVisible: false,
+            mainWindowHiddenAt: hiddenAt,
+            now: hiddenAt.addingTimeInterval(6)
+        ))
+    }
+
+    func testExplicitQuitIsNeverSuppressed() {
+        let hiddenAt = Date(timeIntervalSince1970: 100)
+
+        XCTAssertFalse(ApplicationTerminationPolicy.shouldSuppressUnexpectedTermination(
+            explicitTerminationRequested: true,
+            menuBarStatusItemEnabled: true,
+            mainWindowVisible: false,
+            mainWindowHiddenAt: hiddenAt,
+            now: hiddenAt.addingTimeInterval(2)
+        ))
+    }
+
     func testMenuBarUsageSummaryUsesMinimumVisibleValuesAndTwoLineLabels() throws {
         let firstID = UUID()
         let secondID = UUID()
