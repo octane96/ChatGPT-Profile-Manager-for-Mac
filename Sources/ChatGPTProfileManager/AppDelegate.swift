@@ -5722,8 +5722,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             return
         }
 
-        if let account = launcher.accounts.first(where: { $0.id == accountID }) {
-            openOrFocusAccount(account)
+        guard let account = launcher.accounts.first(where: { $0.id == accountID }) else {
+            return
+        }
+
+        // A status-item action is invoked while the transient popover is still
+        // the key window. Close it before asking ChatGPT to become active; on
+        // macOS the two activation requests can otherwise race and the focus
+        // request is rejected even though the ChatGPT process is healthy.
+        statusPopover?.performClose(nil)
+        DispatchQueue.main.async { [weak self] in
+            self?.openOrFocusAccount(account)
         }
     }
 
