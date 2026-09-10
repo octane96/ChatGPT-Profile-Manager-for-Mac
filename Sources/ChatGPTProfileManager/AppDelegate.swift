@@ -192,10 +192,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     private var usageFetchStates: [UUID: UsageFetchState] = [:]
     private var usageLastUpdatedAt: [UUID: Date] = [:]
     private var notifiedUsageThresholds: Set<String> = []
+    private var notifiedUnexpectedWeeklyResets: Set<String> = []
     private var usageRefreshTimer: Timer?
     private var lastUsageRefreshAt: Date?
     private var scheduledUsageNotificationIDs: Set<String> = []
     private let usageNotificationsEnabledKey = "usageResetNotificationsEnabled"
+    private let unexpectedUsageResetNotificationsEnabledKey = "unexpectedUsageResetNotificationsEnabled"
     private let usageWarningNotificationsEnabledKey = "usageWarningNotificationsEnabled"
     private let usageCriticalNotificationsEnabledKey = "usageCriticalNotificationsEnabled"
     private let compactUsageStatusEnabledKey = MenuBarPreferences.compactUsageStatusKey
@@ -592,7 +594,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         usage.spacing = 2
         let snapshot = usageByAccountID[account.id]
         usage.addArrangedSubview(makeUsageLabel(title: "5H", window: snapshot?.primary, resetDateStyle: .timeOnly))
-        usage.addArrangedSubview(makeUsageLabel(title: L10n.text("usage.weekly", fallback: "週間"), window: snapshot?.secondary, resetDateStyle: .monthDayAndTime))
+        usage.addArrangedSubview(makeUsageLabel(title: L10n.text("usage.weekly", fallback: "Weekly"), window: snapshot?.secondary, resetDateStyle: .monthDayAndTime))
         if let credits = snapshot?.rateLimitResetCredits {
             if credits.availableCount > 0 {
                 usage.addArrangedSubview(
@@ -1372,6 +1374,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                     : .loaded(finishedAt))
             })
             self.evaluateUsageThresholdNotifications(previous: oldSnapshots, refreshed: snapshots)
+            self.evaluateUnexpectedWeeklyResetNotifications(
+                previous: oldSnapshots,
+                refreshed: snapshots,
+                observedAt: finishedAt
+            )
             self.scheduleUsageResetNotifications(
                 for: accountHomes.compactMap { accountID, _ in
                     guard let snapshot = self.usageByAccountID[accountID],
@@ -1394,14 +1401,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         previous: [UUID: AccountUsageSnapshot],
         refreshed: [UUID: AccountUsageSnapshot]
     ) {
-        let center = UNUserNotificationCenter.current()
         var notifications: [(String, String)] = []
         for (accountID, snapshot) in refreshed {
             guard let account = launcher.accounts.first(where: { $0.id == accountID }) else { continue }
             let old = previous[accountID]
             let windows: [(String, String, UsageWindow?, UsageWindow?)] = [
                 ("5H", "primary", old?.primary, snapshot.primary),
-                (L10n.text("usage.weekly", fallback: "週間"), "secondary", old?.secondary, snapshot.secondary)
+                (L10n.text("usage.weekly", fallback: "Weekly"), "secondary", old?.secondary, snapshot.secondary)
             ]
             for (displayName, key, oldWindow, newWindow) in windows {
                 guard let newWindow else { continue }
@@ -1433,7 +1439,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                 }
             }
         }
+        postUsageNotifications(notifications, identifierPrefix: "usage-threshold")
+    }
+
+    private func evaluateUnexpectedWeeklyResetNotifications(
+        previous: [UUID: AccountUsageSnapshot],
+        refreshed: [UUID: AccountUsageSnapshot],
+        observedAt: Date
+    ) {
+        guard unexpectedUsageResetNotificationsEnabled else { return }
+
+        var notifications: [(String, String)] = []
+        for (accountID, snapshot) in refreshed {
+            guard
+                let account = launcher.accounts.first(where: { $0.id == accountID }),
+                let currentWeekly = snapshot.secondary,
+                UnexpectedUsageResetDetector.weeklyResetWasUnexpected(
+                    previous: previous[accountID]?.secondary,
+                    current: currentWeekly,
+                    observedAt: observedAt
+                ),
+                let resetDate = currentWeekly.resetsAt
+            else {
+                continue
+            }
+
+            let resetKey = "\(accountID.uuidString)-weekly-\(Int(resetDate.timeIntervalSince1970))"
+            guard notifiedUnexpectedWeeklyResets.insert(resetKey).inserted else { continue }
+            notifications.append(
+                (
+                    L10n.text(
+                        "usage.unexpected-reset.title",
+                        fallback: "Weekly利用枠の予定外リセットを検知"
+                    ),
+                    L10n.text(
+                        "usage.unexpected-reset.body",
+                        fallback: "{name}のWeekly利用枠が予定時刻より前にリセットされた可能性があります。",
+                        replacing: ["name": account.name]
+                    )
+                )
+            )
+        }
+        postUsageNotifications(notifications, identifierPrefix: "usage-unexpected-reset")
+    }
+
+    private func postUsageNotifications(
+        _ notifications: [(String, String)],
+        identifierPrefix: String
+    ) {
         guard !notifications.isEmpty else { return }
+        let center = UNUserNotificationCenter.current()
         Task { @MainActor in
             let granted = (try? await center.requestAuthorization(options: [.alert, .sound])) ?? false
             guard granted else { return }
@@ -1443,7 +1498,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                 content.body = body
                 content.sound = .default
                 try? await center.add(UNNotificationRequest(
-                    identifier: "usage-threshold-\(UUID().uuidString)",
+                    identifier: "\(identifierPrefix)-\(UUID().uuidString)",
                     content: content,
                     trigger: nil
                 ))
@@ -1468,6 +1523,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         return UserDefaults.standard.bool(forKey: usageNotificationsEnabledKey)
     }
 
+    private var unexpectedUsageResetNotificationsEnabled: Bool {
+        UserDefaults.standard.bool(forKey: unexpectedUsageResetNotificationsEnabledKey)
+    }
+
     private func scheduleUsageResetNotifications(
         for entries: [(AccountProfile, AccountUsageSnapshot)]
     ) {
@@ -1486,7 +1545,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         for (account, snapshot) in entries {
             let windows: [(String, String, UsageWindow?)] = [
                 ("primary", "5H", snapshot.primary),
-                ("secondary", L10n.text("usage.weekly", fallback: "週間"), snapshot.secondary)
+                ("secondary", L10n.text("usage.weekly", fallback: "Weekly"), snapshot.secondary)
             ]
             for (kindKey, kind, window) in windows {
                 guard let resetDate = window?.resetsAt, resetDate > now.addingTimeInterval(30) else { continue }
@@ -1921,7 +1980,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         )
         usageStack.addArrangedSubview(
             makeUsageLabel(
-                title: L10n.text("usage.weekly", fallback: "週間"),
+                title: L10n.text("usage.weekly", fallback: "Weekly"),
                 window: usageSnapshot?.secondary,
                 resetDateStyle: .monthDayAndTime
             )
@@ -3672,7 +3731,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         let notificationsCheckbox = NSButton(
             checkboxWithTitle: L10n.text(
                 "settings.notifications.reset",
-                fallback: "利用枠のリセット時に通知"
+                fallback: "5H・Weeklyの利用枠リセット時に通知"
             ),
             target: self,
             action: #selector(toggleUsageResetNotificationsSetting(_:))
@@ -3681,14 +3740,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         notificationsCheckbox.setAccessibilityLabel(
             L10n.text(
                 "settings.notifications.reset.accessibility-label",
-                fallback: "利用上限リセット通知を有効にする"
+                fallback: "5H・Weeklyの利用枠リセット通知を有効にする"
             )
         )
         notificationsStack.addArrangedSubview(notificationsCheckbox)
+        let unexpectedResetCheckbox = NSButton(
+            checkboxWithTitle: L10n.text(
+                "settings.notifications.unexpected-reset",
+                fallback: "Weeklyの予定外の利用枠リセットを検知したら通知"
+            ),
+            target: self,
+            action: #selector(toggleUnexpectedUsageResetNotificationsSetting(_:))
+        )
+        unexpectedResetCheckbox.state = unexpectedUsageResetNotificationsEnabled ? .on : .off
+        unexpectedResetCheckbox.setAccessibilityLabel(
+            L10n.text(
+                "settings.notifications.unexpected-reset.accessibility-label",
+                fallback: "Weeklyの予定外の利用枠リセット通知を有効にする"
+            )
+        )
+        notificationsStack.addArrangedSubview(unexpectedResetCheckbox)
         let warningCheckbox = NSButton(
             checkboxWithTitle: L10n.text(
                 "settings.notifications.warning",
-                fallback: "5H・週間の残量が25%以下になったら通知"
+                fallback: "5H・Weeklyの残量が25%以下になったら通知"
             ),
             target: self,
             action: #selector(toggleUsageWarningSetting(_:))
@@ -3698,7 +3773,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         let criticalCheckbox = NSButton(
             checkboxWithTitle: L10n.text(
                 "settings.notifications.critical",
-                fallback: "5H・週間の残量が10%以下になったら通知"
+                fallback: "5H・Weeklyの残量が10%以下になったら通知"
             ),
             target: self,
             action: #selector(toggleUsageCriticalSetting(_:))
@@ -3708,7 +3783,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         let notificationsDescription = NSTextField(
             wrappingLabelWithString: L10n.text(
                 "settings.notifications.description",
-                fallback: "5H・週間の残量と利用枠のリセットをmacOS通知で知らせます。\n各通知は個別に設定できます。\n初回通知時にmacOSが許可を求める場合があります。"
+                fallback: "5H・Weeklyの残量と利用枠のリセット、Weeklyの予定外リセットをmacOS通知で知らせます。\n各通知は個別に設定できます。\n初回通知時にmacOSが許可を求める場合があります。"
             )
         )
         notificationsDescription.font = .systemFont(ofSize: 12)
@@ -4284,6 +4359,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             forKey: usageNotificationsEnabledKey
         )
         scheduleUsageResetNotificationsForCurrentAccounts()
+    }
+
+    @objc
+    private func toggleUnexpectedUsageResetNotificationsSetting(_ sender: NSButton) {
+        UserDefaults.standard.set(
+            sender.state == .on,
+            forKey: unexpectedUsageResetNotificationsEnabledKey
+        )
     }
 
     @objc
@@ -4949,7 +5032,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                     content,
                     L10n.text(
                         "guide.mechanism.usage-body",
-                        fallback: "アカウント一覧には取得できたプラン名も表示します。「5H」は5時間枠、「週間」は週間枠です。5Hは残りの割合と24時間表記の時刻、週間は残りの割合と月日・24時間表記の時刻を同じ行に表示します。利用できる上限リセットクレジットがある場合は、週間行の下に件数と有効期限を表示します。複数件ある場合は期限を一行ずつ表示します。ラベルにカーソルを合わせると、使用済みの割合と詳細なリセット日時を確認できます。Codexコマンドが見つからない場合、未ログインの場合、または通信できない場合は「—」と表示します。利用状況や認証情報をこのアプリの設定へ保存することはありません。"
+                        fallback: "アカウント一覧には取得できたプラン名も表示します。「5H」は5時間枠、「Weekly」はWeekly枠です。5Hは残りの割合と24時間表記の時刻、Weeklyは残りの割合と月日・24時間表記の時刻を同じ行に表示します。利用できる上限リセットクレジットがある場合は、Weekly行の下に件数と有効期限を表示します。複数件ある場合は期限を一行ずつ表示します。ラベルにカーソルを合わせると、使用済みの割合と詳細なリセット日時を確認できます。Codexコマンドが見つからない場合、未ログインの場合、または通信できない場合は「—」と表示します。利用状況や認証情報をこのアプリの設定へ保存することはありません。"
                     ),
                     font: bodyFont,
                     paragraphStyle: bodyParagraphStyle

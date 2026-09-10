@@ -257,21 +257,25 @@ Launch apps invoke the installed ChatGPT.app. They do not clone, replace, or re-
 
 ## 利用状況と通知 / Usage and notifications
 
-プロファイルカードには、取得できた場合にプラン名、5時間枠、週間枠、上限リセットクレジットを表示します。割合は残りの割合です。
+プロファイルカードには、取得できた場合にプラン名、5時間枠、Weekly枠、上限リセットクレジットを表示します。割合は残りの割合です。
 
-When available, profile cards show the plan, five-hour window, weekly window, and limit-reset credits. Percentages indicate the remaining amount.
+When available, profile cards show the plan, five-hour window, Weekly window, and limit-reset credits. Percentages indicate the remaining amount.
 
 - 5H：残り%と24時間表記のリセット時刻 / 5H: remaining percentage and reset time in 24-hour format
-- 週間：残り%と月日・24時間表記のリセット時刻 / Weekly: remaining percentage and reset date/time
+- Weekly：残り%と月日・24時間表記のリセット時刻 / Weekly: remaining percentage and reset date/time
 - 上限リセット：件数と有効期限（複数件は一覧表示） / Limit resets: count and expiration dates
 
-メインウィンドウを閉じても、メニューバーから利用状況を確認できます。メニューバー項目自体は設定から表示・非表示を切り替えられます。初期状態では表示対象プロファイルの最小残量を2行（`5h 33%`、`W 48%`）で表示し、残量表示中はアイコンを表示しません。残量表示をオフにした場合は、`Resources/AppIcon.icns`のP型ロゴを元にした透明背景・単色のメニューバー専用アイコンを表示します。表示はメニューバー内で上下中央に揃え、左右に不要な余白を設けません。ポップオーバーには表示対象プロファイルごとの5H、週間、上限リセット件数と有効期限、最終確認時刻を表示します。上限リセットの詳細は折り畳み（初期状態）で、プロファイルのお気に入り・表示/非表示はメイン画面の設定から変更します。明示的に「終了」した場合はメニューバー項目も終了します。
+メインウィンドウを閉じても、メニューバーから利用状況を確認できます。メニューバー項目自体は設定から表示・非表示を切り替えられます。初期状態では表示対象プロファイルの最小残量を2行（`5h 33%`、`W 48%`）で表示し、残量表示中はアイコンを表示しません。残量表示をオフにした場合は、`Resources/AppIcon.icns`のP型ロゴを元にした透明背景・単色のメニューバー専用アイコンを表示します。表示はメニューバー内で上下中央に揃え、左右に不要な余白を設けません。ポップオーバーには表示対象プロファイルごとの5H、Weekly、上限リセット件数と有効期限、最終確認時刻を表示します。上限リセットの詳細は折り畳み（初期状態）で、プロファイルのお気に入り・表示/非表示はメイン画面の設定から変更します。明示的に「終了」した場合はメニューバー項目も終了します。
 
 アプリ起動時、前面表示時、スリープ復帰時、手動更新時に全プロファイルを更新し、通常は15分間隔でも更新します。取得に失敗しても直前の成功値を保持し、失敗状態と最終確認時刻を表示します。
 
-The app remains available from the menu bar after the main window closes. The menu bar item itself can be shown or hidden from Settings. By default, it shows the minimum remaining amount across visible profiles on two lines (`5h 33%` and `W 48%`); no icon is shown while the remaining-usage text is enabled. When the text is disabled, a compact monochrome, transparent-background menu bar icon generated from the P mark in `Resources/AppIcon.icns` is shown instead of the full app icon. The content is vertically centered with no unnecessary left/right padding. Its popover shows each visible profile’s five-hour window, weekly window, limit-reset count and expiration, and last successful check. Limit-reset details are collapsed by default; favorite and visibility are managed from the main window’s settings. Choosing **Quit** explicitly ends the manager and removes the menu bar item.
+The app remains available from the menu bar after the main window closes. The menu bar item itself can be shown or hidden from Settings. By default, it shows the minimum remaining amount across visible profiles on two lines (`5h 33%` and `W 48%`); no icon is shown while the remaining-usage text is enabled. When the text is disabled, a compact monochrome, transparent-background menu bar icon generated from the P mark in `Resources/AppIcon.icns` is shown instead of the full app icon. The content is vertically centered with no unnecessary left/right padding. Its popover shows each visible profile’s five-hour window, Weekly window, limit-reset count and expiration, and last successful check. Limit-reset details are collapsed by default; favorite and visibility are managed from the main window’s settings. Choosing **Quit** explicitly ends the manager and removes the menu bar item.
 
 Usage refreshes at launch, activation, wake, and manual refresh, plus every 15 minutes while running. A failed fetch retains the last successful value and reports the failure separately.
+
+予定外のリセット検知は、アプリが利用状況を更新したときに前回値と今回値を比較します。Weeklyの予定時刻がまだ先なのに使用率が下がり、次のリセット時刻へ移った場合に通知します。
+
+Unexpected-reset detection compares the previous and current values when the app refreshes usage. It notifies when the Weekly reset time was still in the future, usage decreased, and the reset time moved to the next cycle.
 
 設定では、以下を個別に設定できます（残量表示は初期状態で有効、その他は無効）：
 
@@ -279,9 +283,9 @@ Usage refreshes at launch, activation, wake, and manual refresh, plus every 15 m
 - 残量25%以下・10%以下の遷移時通知（閾値を再び上回ると再通知可能） / Notifications when remaining usage crosses 25% or 10%; re-armed after recovery
 - メニューバーのコンパクト表示（表示中プロファイルの最小残量、初期状態で有効） / Compact menu bar text showing the minimum remaining amount across visible profiles (enabled by default)
 
-表示対象とお気に入りは、各プロファイルの`…`メニューから変更できます。既存の登録は全件表示・お気に入りなしとして移行されます。非表示プロファイルもメイン画面、更新、リセット通知、閾値通知の対象です。
+表示対象とお気に入りは、各プロファイルの`…`メニューから変更できます。既存の登録は全件表示・お気に入りなしとして移行されます。非表示プロファイルもメイン画面、更新、リセット通知、閾値通知の対象です。予定外のリセット検知通知はWeeklyだけを対象にします。
 
-The visibility and favorite flags are available from each profile’s `…` menu. Existing registrations migrate to all-visible, no-favorites defaults. Hidden profiles remain available in the main window and are still included in refreshes and notifications.
+The visibility and favorite flags are available from each profile’s `…` menu. Existing registrations migrate to all-visible, no-favorites defaults. Hidden profiles remain available in the main window and are still included in refreshes and notifications. Unexpected-reset detection applies to the Weekly window only.
 
 Codexコマンドが見つからない、未ログイン、または取得に失敗した場合は`—`と表示します。利用状況や認証情報をこのアプリの設定へ保存しません。
 
@@ -292,7 +296,8 @@ The UI shows `—` when the Codex command is unavailable, the profile is not sig
 Settings contains app-wide preferences only:
 
 - 表示言語：Macの設定に従う、日本語、English / Display language: Follow Mac Settings, Japanese, or English
-- 利用上限リセットを通知 / Notify when usage limits reset
+- 5H・Weeklyの利用上限リセットを通知 / Notify when 5H or Weekly usage limits reset
+- Weeklyの予定外の利用上限リセットを検知したら通知 / Notify when an unexpected Weekly usage-limit reset is detected
 - メニューバー：メニューバーへの表示、ログイン時起動、コンパクト表示、25%/10%閾値通知 / Menu Bar: show in the menu bar, launch at login, compact status, and 25%/10% threshold notifications
 - プロファイル一覧・共有グループの管理情報、ChatGPT.app・Codexコマンドの検出、バックアップ復元 / Management-data health, ChatGPT.app and Codex command detection, and backup restoration
 - 共有グループの一覧 / Shared group list

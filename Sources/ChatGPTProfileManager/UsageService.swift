@@ -93,6 +93,43 @@ enum UsageThresholdEvaluator {
     }
 }
 
+enum UnexpectedUsageResetDetector {
+    static let weeklyWindowDurationMinutes = 10_080
+    static let scheduledResetTolerance: TimeInterval = 15 * 60
+    static let resetDateChangeTolerance: TimeInterval = 60
+
+    /// Detects a Weekly reset that appears to have happened before the
+    /// previously reported reset time. The API does not expose the cause of
+    /// a reset, so this deliberately reports an observation rather than
+    /// attributing it to a particular server-side action.
+    static func weeklyResetWasUnexpected(
+        previous: UsageWindow?,
+        current: UsageWindow?,
+        observedAt: Date
+    ) -> Bool {
+        guard
+            let previous,
+            let current,
+            isWeekly(previous),
+            isWeekly(current),
+            let previousReset = previous.resetsAt,
+            let currentReset = current.resetsAt,
+            previousReset > observedAt.addingTimeInterval(scheduledResetTolerance),
+            currentReset > observedAt,
+            currentReset > previousReset.addingTimeInterval(resetDateChangeTolerance),
+            current.usedPercent < previous.usedPercent
+        else {
+            return false
+        }
+
+        return true
+    }
+
+    private static func isWeekly(_ window: UsageWindow) -> Bool {
+        window.windowDurationMinutes == weeklyWindowDurationMinutes
+    }
+}
+
 struct RateLimitResetCreditsSummary: Equatable, Sendable {
     let availableCount: Int
     let credits: [RateLimitResetCredit]?
