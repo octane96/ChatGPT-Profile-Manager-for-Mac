@@ -88,6 +88,15 @@ enum ApplicationTerminationPolicy {
     }
 }
 
+enum ApplicationAboutPanel {
+    static func options(applicationVersion: String) -> [NSApplication.AboutPanelOptionKey: Any] {
+        [
+            .applicationVersion: applicationVersion,
+            .version: ""
+        ]
+    }
+}
+
 @MainActor
 enum MenuBarFavoriteButtonPresentation {
     static func symbolName(isFavorite: Bool) -> String {
@@ -875,6 +884,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         NSApp.terminate(sender)
     }
 
+    @objc
+    private func showAboutPanel(_ sender: Any?) {
+        let applicationVersion = Bundle.main.object(
+            forInfoDictionaryKey: "CFBundleShortVersionString"
+        ) as? String ?? ""
+        NSApp.orderFrontStandardAboutPanel(
+            options: ApplicationAboutPanel.options(applicationVersion: applicationVersion)
+        )
+    }
+
     func windowWillClose(_ notification: Notification) {
         guard
             let closingWindow = notification.object as? NSWindow
@@ -940,7 +959,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                 "menu.about",
                 fallback: "ChatGPT Profile Managerについて"
             ),
-            action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
+            action: #selector(showAboutPanel(_:)),
             keyEquivalent: ""
         )
         applicationMenu.addItem(.separator())

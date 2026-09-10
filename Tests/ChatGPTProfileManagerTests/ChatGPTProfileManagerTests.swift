@@ -186,6 +186,13 @@ final class ChatGPTProfileManagerTests: XCTestCase {
         ))
     }
 
+    func testAboutPanelShowsMarketingVersionWithoutBuildNumber() {
+        let options = ApplicationAboutPanel.options(applicationVersion: "1.1.1")
+
+        XCTAssertEqual(options[.applicationVersion] as? String, "1.1.1")
+        XCTAssertEqual(options[.version] as? String, "")
+    }
+
     func testMenuBarUsageSummaryUsesMinimumVisibleValuesAndTwoLineLabels() throws {
         let firstID = UUID()
         let secondID = UUID()
