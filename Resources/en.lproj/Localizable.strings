@@ -320,6 +320,8 @@
 "usage.fetch-failed-tooltip" = "Usage information could not be retrieved. {date}";
 "usage.notification.title" = "Usage limit reset";
 "usage.notification.body" = "The {kind} window for {name} has been reset.";
+"usage.unexpected-reset.title" = "Unexpected Weekly reset detected";
+"usage.unexpected-reset.body" = "The Weekly usage window for {name} may have reset earlier than scheduled.";
 "usage.reset-credits.unavailable" = "Limit resets —";
 "usage.threshold.title" = "Usage limit: {level}";
 "usage.threshold.warning" = "warning";
@@ -338,11 +340,13 @@
 "profile.login.unavailable" = "Login status unavailable";
 "launcher.needs-update-badge" = "Launcher update needed";
 "settings.notifications.section-title" = "Notifications";
-"settings.notifications.reset" = "Notify when usage limits reset";
-"settings.notifications.reset.accessibility-label" = "Enable usage limit reset notifications";
-"settings.notifications.warning" = "Notify when 5H or weekly remaining usage reaches 25%";
-"settings.notifications.critical" = "Notify when 5H or weekly remaining usage reaches 10%";
-"settings.notifications.description" = "Get macOS notifications for 5-hour and weekly remaining usage and limit resets.\nEach notification can be configured separately.\nmacOS may ask for permission when the first notification is sent.";
+"settings.notifications.reset" = "Notify when 5H or Weekly usage limits reset";
+"settings.notifications.reset.accessibility-label" = "Enable 5H and Weekly usage limit reset notifications";
+"settings.notifications.unexpected-reset" = "Notify when an unexpected Weekly reset is detected";
+"settings.notifications.unexpected-reset.accessibility-label" = "Enable unexpected Weekly reset notifications";
+"settings.notifications.warning" = "Notify when 5H or Weekly remaining usage reaches 25%";
+"settings.notifications.critical" = "Notify when 5H or Weekly remaining usage reaches 10%";
+"settings.notifications.description" = "Get macOS notifications for 5H and Weekly remaining usage and scheduled resets, plus unexpected Weekly resets.\nEach notification can be configured separately.\nmacOS may ask for permission when the first notification is sent.";
 "settings.launch.section-title" = "Launch";
 "settings.launch.login-item" = "Launch at login";
 "settings.launch.description" = "Automatically launch ChatGPT Profile Manager when you log in to your Mac.";

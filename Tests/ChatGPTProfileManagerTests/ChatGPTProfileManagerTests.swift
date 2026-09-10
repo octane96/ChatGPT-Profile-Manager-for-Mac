@@ -1058,6 +1058,117 @@ final class ChatGPTProfileManagerTests: XCTestCase {
         )
     }
 
+    func testUnexpectedUsageResetDetectorOnlyDetectsAnEarlyWeeklyReset() {
+        let observedAt = Date(timeIntervalSince1970: 1_800_000_000)
+        let previousReset = observedAt.addingTimeInterval(24 * 60 * 60)
+        let currentReset = observedAt.addingTimeInterval(8 * 24 * 60 * 60)
+        let previousWeekly = UsageWindow(
+            usedPercent: 70,
+            windowDurationMinutes: 10_080,
+            resetsAt: previousReset
+        )
+        let currentWeekly = UsageWindow(
+            usedPercent: 5,
+            windowDurationMinutes: 10_080,
+            resetsAt: currentReset
+        )
+
+        XCTAssertTrue(
+            UnexpectedUsageResetDetector.weeklyResetWasUnexpected(
+                previous: previousWeekly,
+                current: currentWeekly,
+                observedAt: observedAt
+            )
+        )
+
+        let previousFiveHour = UsageWindow(
+            usedPercent: 70,
+            windowDurationMinutes: 300,
+            resetsAt: previousReset
+        )
+        let currentFiveHour = UsageWindow(
+            usedPercent: 5,
+            windowDurationMinutes: 300,
+            resetsAt: currentReset
+        )
+        XCTAssertFalse(
+            UnexpectedUsageResetDetector.weeklyResetWasUnexpected(
+                previous: previousFiveHour,
+                current: currentFiveHour,
+                observedAt: observedAt
+            )
+        )
+    }
+
+    func testUnexpectedUsageResetDetectorIgnoresExpectedOrIncompleteChanges() {
+        let observedAt = Date(timeIntervalSince1970: 1_800_000_000)
+        let previousReset = observedAt.addingTimeInterval(-60)
+        let currentReset = observedAt.addingTimeInterval(7 * 24 * 60 * 60)
+        let previous = UsageWindow(
+            usedPercent: 70,
+            windowDurationMinutes: 10_080,
+            resetsAt: previousReset
+        )
+        let current = UsageWindow(
+            usedPercent: 5,
+            windowDurationMinutes: 10_080,
+            resetsAt: currentReset
+        )
+
+        XCTAssertFalse(
+            UnexpectedUsageResetDetector.weeklyResetWasUnexpected(
+                previous: previous,
+                current: current,
+                observedAt: observedAt
+            )
+        )
+
+        let unchangedResetDate = UsageWindow(
+            usedPercent: 5,
+            windowDurationMinutes: 10_080,
+            resetsAt: previousReset.addingTimeInterval(24 * 60 * 60)
+        )
+        XCTAssertFalse(
+            UnexpectedUsageResetDetector.weeklyResetWasUnexpected(
+                previous: UsageWindow(
+                    usedPercent: 70,
+                    windowDurationMinutes: 10_080,
+                    resetsAt: previousReset.addingTimeInterval(24 * 60 * 60)
+                ),
+                current: unchangedResetDate,
+                observedAt: observedAt
+            )
+        )
+
+        XCTAssertFalse(
+            UnexpectedUsageResetDetector.weeklyResetWasUnexpected(
+                previous: previous,
+                current: UsageWindow(
+                    usedPercent: 5,
+                    windowDurationMinutes: 10_080,
+                    resetsAt: nil
+                ),
+                observedAt: observedAt
+            )
+        )
+
+        XCTAssertFalse(
+            UnexpectedUsageResetDetector.weeklyResetWasUnexpected(
+                previous: UsageWindow(
+                    usedPercent: 70,
+                    windowDurationMinutes: nil,
+                    resetsAt: observedAt.addingTimeInterval(24 * 60 * 60)
+                ),
+                current: UsageWindow(
+                    usedPercent: 5,
+                    windowDurationMinutes: nil,
+                    resetsAt: observedAt.addingTimeInterval(8 * 24 * 60 * 60)
+                ),
+                observedAt: observedAt
+            )
+        )
+    }
+
     func testExistingEnvironmentLaunchSpecUsesDefaultAppProfile() {
         let appURL = URL(fileURLWithPath: "/Applications/Codex.app")
         let spec = CodexLaunchSpec(appURL: appURL, mode: .existingDefault)
