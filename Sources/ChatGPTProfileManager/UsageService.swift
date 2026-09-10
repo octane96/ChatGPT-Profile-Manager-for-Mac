@@ -62,7 +62,12 @@ enum UsageRefreshMerger {
 }
 
 enum MenuBarPreferences {
+    static let statusItemEnabledKey = "menuBarStatusItemEnabled"
     static let compactUsageStatusKey = "compactUsageStatusEnabled"
+
+    static func statusItemEnabled(in defaults: UserDefaults) -> Bool {
+        (defaults.object(forKey: statusItemEnabledKey) as? Bool) ?? true
+    }
 
     static func compactUsageEnabled(in defaults: UserDefaults) -> Bool {
         (defaults.object(forKey: compactUsageStatusKey) as? Bool) ?? true

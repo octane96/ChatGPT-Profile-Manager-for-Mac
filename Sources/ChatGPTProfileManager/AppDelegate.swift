@@ -62,6 +62,60 @@ private final class MenuBarUsageLabel: NSTextField {
     }
 }
 
+enum ApplicationTerminationPolicy {
+    /// Window-based auto-quit utilities can send a quit Apple Event shortly
+    /// after the main window is hidden. In-app quit actions bypass this guard.
+    static let unexpectedQuitSuppressionInterval: TimeInterval = 5
+
+    static func shouldSuppressUnexpectedTermination(
+        explicitTerminationRequested: Bool,
+        menuBarStatusItemEnabled: Bool,
+        mainWindowVisible: Bool,
+        mainWindowHiddenAt: Date?,
+        now: Date = Date()
+    ) -> Bool {
+        guard
+            !explicitTerminationRequested,
+            menuBarStatusItemEnabled,
+            !mainWindowVisible,
+            let mainWindowHiddenAt
+        else {
+            return false
+        }
+
+        let elapsed = now.timeIntervalSince(mainWindowHiddenAt)
+        return elapsed >= 0 && elapsed <= unexpectedQuitSuppressionInterval
+    }
+}
+
+enum ApplicationAboutPanel {
+    static func options(applicationVersion: String) -> [NSApplication.AboutPanelOptionKey: Any] {
+        [
+            .applicationVersion: applicationVersion,
+            .version: ""
+        ]
+    }
+}
+
+@MainActor
+enum MenuBarFavoriteButtonPresentation {
+    static func symbolName(isFavorite: Bool) -> String {
+        isFavorite ? "star.fill" : "star"
+    }
+
+    static func update(_ button: NSButton, isFavorite: Bool) {
+        let actionLabel = isFavorite
+            ? L10n.text("profile.menu.unfavorite", fallback: "お気に入りを解除")
+            : L10n.text("profile.menu.favorite", fallback: "お気に入りにする")
+        button.image = NSImage(
+            systemSymbolName: symbolName(isFavorite: isFavorite),
+            accessibilityDescription: actionLabel
+        ) ?? NSImage()
+        button.toolTip = actionLabel
+        button.setAccessibilityLabel(actionLabel)
+    }
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate {
     private enum AccountStorageChoice: Int {
@@ -123,12 +177,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     private var revealButton: NSButton?
     private var settingsButton: NSButton?
     private var usageRefreshButton: NSButton?
-    private weak var settingsLanguagePopup: NSPopUpButton?
-    private weak var settingsUsageNotificationCheckbox: NSButton?
-    private weak var settingsUsageWarningCheckbox: NSButton?
-    private weak var settingsUsageCriticalCheckbox: NSButton?
-    private weak var settingsCompactUsageCheckbox: NSButton?
-    private weak var settingsLoginItemCheckbox: NSButton?
+    private var settingsMenuBarDependentControls: [NSControl] = []
     private weak var settingsProfileHealthLabel: NSTextField?
     private weak var settingsSettingsHealthLabel: NSTextField?
     private weak var settingsProfileRestoreButton: NSButton?
@@ -164,8 +213,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     private var statusPopoverStack: NSStackView?
     private weak var statusUsageLabel: MenuBarUsageLabel?
     private let menuBarIcon = MenuBarIcon.make()
+    private var explicitTerminationRequested = false
+    private var mainWindowHiddenAt: Date?
+    private var isTerminating = false
     private var launchedInBackground = false
-    private var isRebuildingInterface = false
     private var isLaunching = false {
         didSet {
             updateControlAvailability()
@@ -182,6 +233,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
 
     private var compactUsageStatusEnabled: Bool {
         MenuBarPreferences.compactUsageEnabled(in: UserDefaults.standard)
+    }
+
+    private var menuBarStatusItemEnabled: Bool {
+        MenuBarPreferences.statusItemEnabled(in: UserDefaults.standard)
     }
 
     private func configureStatusItem() {
@@ -226,6 +281,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         popover.animates = false
         statusPopover = popover
         updateStatusItem()
+    }
+
+    private func synchronizeStatusItemVisibility() {
+        if menuBarStatusItemEnabled {
+            configureStatusItem()
+            updateStatusItem()
+        } else {
+            removeStatusItem()
+        }
+    }
+
+    private func removeStatusItem() {
+        statusPopover?.performClose(nil)
+        if let statusItem {
+            NSStatusBar.system.removeStatusItem(statusItem)
+        }
+        statusItem = nil
+        statusPopover = nil
+        statusPopoverDocument = nil
+        statusPopoverStack = nil
+        statusUsageLabel = nil
     }
 
     private func startUsageRefreshTimer() {
@@ -431,8 +507,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         footer.addArrangedSubview(NSView())
         let quitButton = NSButton(
             title: L10n.text("menu.quit", fallback: "終了"),
-            target: NSApp,
-            action: #selector(NSApplication.terminate(_:))
+            target: self,
+            action: #selector(requestApplicationTermination(_:))
         )
         quitButton.bezelStyle = .rounded
         quitButton.controlSize = .small
@@ -586,7 +662,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         guard let accountID = accountID(from: sender),
               let account = launcher.accounts.first(where: { $0.id == accountID }) else { return }
         do {
-            try launcher.setAccountFavorite(id: accountID, isFavorite: !account.isFavorite)
+            let isFavorite = !account.isFavorite
+            try launcher.setAccountFavorite(id: accountID, isFavorite: isFavorite)
+            MenuBarFavoriteButtonPresentation.update(sender, isFavorite: isFavorite)
             refreshUI()
             updateStatusPopover()
         } catch { presentError(error) }
@@ -625,11 +703,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         } catch { presentError(error) }
     }
 
+    @objc
+    private func toggleMenuBarStatusItemSetting(_ sender: NSButton) {
+        let isEnabled = sender.state == .on
+        let wasEnabled = menuBarStatusItemEnabled
+        UserDefaults.standard.set(
+            isEnabled,
+            forKey: MenuBarPreferences.statusItemEnabledKey
+        )
+        setMenuBarDependentControlsEnabled(isEnabled)
+
+        if !isEnabled && wasEnabled && window?.isVisible != true {
+            showMainWindow()
+            settingsWindow?.makeKeyAndOrderFront(nil)
+        }
+        synchronizeStatusItemVisibility()
+    }
+
+    private func setMenuBarDependentControlsEnabled(_ isEnabled: Bool) {
+        settingsMenuBarDependentControls.forEach { $0.isEnabled = isEnabled }
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         configureMainMenu()
         configureWindow()
-        configureStatusItem()
+        synchronizeStatusItemVisibility()
         startUsageRefreshTimer()
         refreshUI()
         refreshUsage()
@@ -653,9 +752,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             object: nil
         )
         // SMAppService launches the app in the background at login. Keep the
-        // menu bar item available without surfacing the main window in that
-        // case; an interactive launch remains unchanged.
+        // menu bar item available without surfacing the main window only when
+        // the user has enabled menu bar display; otherwise keep the app
+        // discoverable by showing its main window.
         launchedInBackground = SMAppService.mainApp.status == .enabled
+            && menuBarStatusItemEnabled
             && !NSApp.isActive
             && !launcher.accounts.isEmpty
         if !launchedInBackground {
@@ -692,18 +793,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         }
         usageRefreshTimer?.invalidate()
         usageRefreshTimer = nil
-        statusPopover?.performClose(nil)
-        if let statusItem {
-            NSStatusBar.system.removeStatusItem(statusItem)
-        }
-        statusItem = nil
+        removeStatusItem()
         NSWorkspace.shared.notificationCenter.removeObserver(self)
     }
 
     func applicationShouldTerminate(
         _ sender: NSApplication
     ) -> NSApplication.TerminateReply {
+        if ApplicationTerminationPolicy.shouldSuppressUnexpectedTermination(
+            explicitTerminationRequested: explicitTerminationRequested,
+            menuBarStatusItemEnabled: menuBarStatusItemEnabled,
+            mainWindowVisible: window?.isVisible == true,
+            mainWindowHiddenAt: mainWindowHiddenAt
+        ) {
+            return .terminateCancel
+        }
         guard diagnosticsExecutionState.blocksApplicationTermination else {
+            isTerminating = true
             return .terminateNow
         }
 
@@ -719,6 +825,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         )
         alert.addButton(withTitle: L10n.text("common.ok", fallback: "OK"))
         alert.runModal()
+        explicitTerminationRequested = false
         return .terminateCancel
     }
 
@@ -745,7 +852,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     func applicationShouldTerminateAfterLastWindowClosed(
         _ sender: NSApplication
     ) -> Bool {
-        false
+        return false
     }
 
     func applicationShouldHandleReopen(
@@ -754,6 +861,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     ) -> Bool {
         showMainWindow()
         return true
+    }
+
+    func windowShouldClose(_ window: NSWindow) -> Bool {
+        guard window === self.window, !isTerminating else {
+            return true
+        }
+
+        hideMainWindow(window)
+        return false
+    }
+
+    @objc
+    private func hideMainWindow(_ sender: Any?) {
+        mainWindowHiddenAt = Date()
+        window?.orderOut(nil)
+    }
+
+    @objc
+    private func requestApplicationTermination(_ sender: Any?) {
+        explicitTerminationRequested = true
+        NSApp.terminate(sender)
+    }
+
+    @objc
+    private func showAboutPanel(_ sender: Any?) {
+        let applicationVersion = Bundle.main.object(
+            forInfoDictionaryKey: "CFBundleShortVersionString"
+        ) as? String ?? ""
+        NSApp.orderFrontStandardAboutPanel(
+            options: ApplicationAboutPanel.options(applicationVersion: applicationVersion)
+        )
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -765,7 +903,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
 
         if closingWindow === settingsWindow {
             settingsWindow = nil
-            settingsLanguagePopup = nil
+            settingsMenuBarDependentControls.removeAll()
             return
         }
 
@@ -821,18 +959,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
                 "menu.about",
                 fallback: "ChatGPT Profile Managerについて"
             ),
-            action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
+            action: #selector(showAboutPanel(_:)),
             keyEquivalent: ""
         )
         applicationMenu.addItem(.separator())
-        applicationMenu.addItem(
-            withTitle: L10n.text(
+        let quitApplicationItem = NSMenuItem(
+            title: L10n.text(
                 "menu.quit",
                 fallback: "ChatGPT Profile Managerを終了"
             ),
-            action: #selector(NSApplication.terminate(_:)),
+            action: #selector(requestApplicationTermination(_:)),
             keyEquivalent: "q"
         )
+        quitApplicationItem.target = self
+        applicationMenu.addItem(quitApplicationItem)
         applicationMenuItem.submenu = applicationMenu
 
         let windowMenuItem = NSMenuItem()
@@ -840,11 +980,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         let windowMenu = NSMenu(
             title: L10n.text("menu.window", fallback: "ウィンドウ")
         )
-        windowMenu.addItem(
-            withTitle: L10n.text("menu.window.close", fallback: "ウィンドウを閉じる"),
-            action: #selector(NSWindow.performClose(_:)),
+        let hideMainWindowItem = NSMenuItem(
+            title: L10n.text("menu.window.close", fallback: "ウィンドウを閉じる"),
+            action: #selector(hideMainWindow(_:)),
             keyEquivalent: "w"
         )
+        hideMainWindowItem.target = self
+        windowMenu.addItem(hideMainWindowItem)
         windowMenu.addItem(
             withTitle: L10n.text("menu.window.minimize", fallback: "しまう"),
             action: #selector(NSWindow.performMiniaturize(_:)),
@@ -1126,10 +1268,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         self.settingsButton = settingsButton
         self.usageRefreshButton = usageRefreshButton
 
+        // Closing the main window should hide it while keeping the manager
+        // alive for the menu bar item. Explicit Quit remains the only way to
+        // terminate the application.
+        window.delegate = self
         self.window = window
     }
 
     private func showMainWindow() {
+        mainWindowHiddenAt = nil
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
@@ -1785,14 +1932,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         usageRow.alignment = .top
         usageRow.spacing = 18
         usageRow.setContentCompressionResistancePriority(.required, for: .vertical)
+        // Keep the reset-credit disclosure in a stable column across profile
+        // rows, regardless of the length of each profile's usage values.
+        usageStack.translatesAutoresizingMaskIntoConstraints = false
+        usageStack.widthAnchor.constraint(equalToConstant: 250).isActive = true
         usageRow.addArrangedSubview(usageStack)
 
         if let resetCredits = usageSnapshot?.rateLimitResetCredits,
            resetCredits.availableCount > 0 {
-            let usageSpacer = NSView()
-            usageSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-            usageSpacer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-            usageRow.addArrangedSubview(usageSpacer)
             usageRow.addArrangedSubview(
                 makeResetCreditDisclosure(accountID: account.id, summary: resetCredits)
             )
@@ -3465,6 +3612,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         ) {
             languagePopup.selectItem(at: selectedIndex)
         }
+        languagePopup.target = self
+        languagePopup.action = #selector(changeDisplayLanguageFromSettings(_:))
         languagePopup.setContentHuggingPriority(.required, for: .horizontal)
 
         languageRow.addArrangedSubview(languageTitle)
@@ -3476,7 +3625,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         let languageDescription = NSTextField(
             wrappingLabelWithString: L10n.text(
                 "settings.language.description",
-                fallback: "「Macの設定に従う」では、Macの第一優先言語が日本語なら日本語、それ以外なら英語で表示します。日本語またはEnglishを選ぶと、Macの設定より優先されます。"
+                fallback: "「Macの設定に従う」では、Macの第一優先言語が日本語なら日本語、それ以外なら英語で表示します。\n日本語またはEnglishを選ぶと、Macの設定より優先されます。"
             )
         )
         languageDescription.font = .systemFont(ofSize: 12)
@@ -3514,26 +3663,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             notificationsStack.topAnchor.constraint(equalTo: notificationsCard.topAnchor, constant: 14),
             notificationsStack.bottomAnchor.constraint(equalTo: notificationsCard.bottomAnchor, constant: -14)
         ])
+        let notificationsTitle = NSTextField(labelWithString: L10n.text(
+            "settings.notifications.section-title",
+            fallback: "通知"
+        ))
+        notificationsTitle.font = .systemFont(ofSize: 13, weight: .semibold)
+        notificationsStack.addArrangedSubview(notificationsTitle)
         let notificationsCheckbox = NSButton(
             checkboxWithTitle: L10n.text(
-                "settings.notifications.title",
-                fallback: "利用上限リセットを通知"
+                "settings.notifications.reset",
+                fallback: "利用枠のリセット時に通知"
             ),
-            target: nil,
-            action: nil
+            target: self,
+            action: #selector(toggleUsageResetNotificationsSetting(_:))
         )
         notificationsCheckbox.state = usageNotificationsEnabled ? .on : .off
         notificationsCheckbox.setAccessibilityLabel(
             L10n.text(
-                "settings.notifications.accessibility-label",
+                "settings.notifications.reset.accessibility-label",
                 fallback: "利用上限リセット通知を有効にする"
             )
         )
         notificationsStack.addArrangedSubview(notificationsCheckbox)
+        let warningCheckbox = NSButton(
+            checkboxWithTitle: L10n.text(
+                "settings.notifications.warning",
+                fallback: "5H・週間の残量が25%以下になったら通知"
+            ),
+            target: self,
+            action: #selector(toggleUsageWarningSetting(_:))
+        )
+        warningCheckbox.state = usageWarningNotificationsEnabled ? .on : .off
+        notificationsStack.addArrangedSubview(warningCheckbox)
+        let criticalCheckbox = NSButton(
+            checkboxWithTitle: L10n.text(
+                "settings.notifications.critical",
+                fallback: "5H・週間の残量が10%以下になったら通知"
+            ),
+            target: self,
+            action: #selector(toggleUsageCriticalSetting(_:))
+        )
+        criticalCheckbox.state = usageCriticalNotificationsEnabled ? .on : .off
+        notificationsStack.addArrangedSubview(criticalCheckbox)
         let notificationsDescription = NSTextField(
             wrappingLabelWithString: L10n.text(
                 "settings.notifications.description",
-                fallback: "5H・週間の利用枠がリセットされる時刻にmacOS通知を表示します。初回保存時に通知の許可を求めます。"
+                fallback: "5H・週間の残量と利用枠のリセットをmacOS通知で知らせます。\n各通知は個別に設定できます。\n初回通知時にmacOSが許可を求める場合があります。"
             )
         )
         notificationsDescription.font = .systemFont(ofSize: 12)
@@ -3543,6 +3718,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         notificationsDescription.widthAnchor.constraint(equalTo: notificationsStack.widthAnchor).isActive = true
         rootStack.addArrangedSubview(notificationsCard)
         notificationsCard.widthAnchor.constraint(equalTo: rootStack.widthAnchor).isActive = true
+
+        let launchCard = ProfileCardView()
+        launchCard.translatesAutoresizingMaskIntoConstraints = false
+        let launchStack = NSStackView()
+        launchStack.orientation = .vertical
+        launchStack.alignment = .leading
+        launchStack.spacing = 8
+        launchStack.translatesAutoresizingMaskIntoConstraints = false
+        launchCard.addSubview(launchStack)
+        NSLayoutConstraint.activate([
+            launchStack.leadingAnchor.constraint(equalTo: launchCard.leadingAnchor, constant: 16),
+            launchStack.trailingAnchor.constraint(equalTo: launchCard.trailingAnchor, constant: -16),
+            launchStack.topAnchor.constraint(equalTo: launchCard.topAnchor, constant: 14),
+            launchStack.bottomAnchor.constraint(equalTo: launchCard.bottomAnchor, constant: -14)
+        ])
+        let launchTitle = NSTextField(labelWithString: L10n.text(
+            "settings.launch.section-title",
+            fallback: "起動"
+        ))
+        launchTitle.font = .systemFont(ofSize: 13, weight: .semibold)
+        launchStack.addArrangedSubview(launchTitle)
+        let loginItemCheckbox = NSButton(
+            checkboxWithTitle: L10n.text(
+                "settings.launch.login-item",
+                fallback: "ログイン時に起動"
+            ),
+            target: self,
+            action: #selector(toggleLoginItemSetting(_:))
+        )
+        loginItemCheckbox.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        launchStack.addArrangedSubview(loginItemCheckbox)
+        let launchDescription = NSTextField(
+            wrappingLabelWithString: L10n.text(
+                "settings.launch.description",
+                fallback: "Macへのログイン時にChatGPT Profile Managerを自動的に起動します。"
+            )
+        )
+        launchDescription.font = .systemFont(ofSize: 12)
+        launchDescription.textColor = .secondaryLabelColor
+        launchDescription.maximumNumberOfLines = 2
+        launchStack.addArrangedSubview(launchDescription)
+        launchDescription.widthAnchor.constraint(equalTo: launchStack.widthAnchor).isActive = true
+        rootStack.addArrangedSubview(launchCard)
+        launchCard.widthAnchor.constraint(equalTo: rootStack.widthAnchor).isActive = true
 
         let menuBarCard = ProfileCardView()
         menuBarCard.translatesAutoresizingMaskIntoConstraints = false
@@ -3564,52 +3783,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         ))
         menuBarTitle.font = .systemFont(ofSize: 13, weight: .semibold)
         menuBarStack.addArrangedSubview(menuBarTitle)
-        let loginItemCheckbox = NSButton(
+        settingsMenuBarDependentControls = []
+        let statusItemCheckbox = NSButton(
             checkboxWithTitle: L10n.text(
-                "settings.menubar.login-item",
-                fallback: "ログイン時に起動"
+                "settings.menubar.status-item",
+                fallback: "メニューバーに表示"
             ),
-            target: nil,
-            action: nil
+            target: self,
+            action: #selector(toggleMenuBarStatusItemSetting(_:))
         )
-        loginItemCheckbox.state = SMAppService.mainApp.status == .enabled ? .on : .off
-        menuBarStack.addArrangedSubview(loginItemCheckbox)
+        statusItemCheckbox.state = menuBarStatusItemEnabled ? .on : .off
+        statusItemCheckbox.setAccessibilityLabel(
+            L10n.text(
+                "settings.menubar.status-item.accessibility-label",
+                fallback: "メニューバー項目を表示する"
+            )
+        )
+        menuBarStack.addArrangedSubview(statusItemCheckbox)
+        let statusItemDescription = NSTextField(
+            wrappingLabelWithString: L10n.text(
+                "settings.menubar.status-item-description",
+                fallback: "オフにするとメニューバー項目を隠します。\nプロファイル設定と通知設定は保持されます。"
+            )
+        )
+        statusItemDescription.font = .systemFont(ofSize: 12)
+        statusItemDescription.textColor = .secondaryLabelColor
+        statusItemDescription.maximumNumberOfLines = 3
+        menuBarStack.addArrangedSubview(statusItemDescription)
+        statusItemDescription.widthAnchor.constraint(equalTo: menuBarStack.widthAnchor).isActive = true
         let compactCheckbox = NSButton(
             checkboxWithTitle: L10n.text(
                 "settings.menubar.compact",
                 fallback: "メニューバーに残量を表示（最小値）"
             ),
-            target: nil,
-            action: nil
+            target: self,
+            action: #selector(toggleCompactUsageSetting(_:))
         )
         compactCheckbox.state = compactUsageStatusEnabled ? .on : .off
         menuBarStack.addArrangedSubview(compactCheckbox)
-        let warningCheckbox = NSButton(
-            checkboxWithTitle: L10n.text(
-                "settings.menubar.warning",
-                fallback: "残量25%以下で通知"
-            ),
-            target: nil,
-            action: nil
-        )
-        warningCheckbox.state = usageWarningNotificationsEnabled ? .on : .off
-        menuBarStack.addArrangedSubview(warningCheckbox)
-        let criticalCheckbox = NSButton(
-            checkboxWithTitle: L10n.text(
-                "settings.menubar.critical",
-                fallback: "残量10%以下で通知"
-            ),
-            target: nil,
-            action: nil
-        )
-        criticalCheckbox.state = usageCriticalNotificationsEnabled ? .on : .off
-        menuBarStack.addArrangedSubview(criticalCheckbox)
+        settingsMenuBarDependentControls.append(compactCheckbox)
         let profileVisibilityTitle = NSTextField(labelWithString: L10n.text(
             "settings.menubar.profiles-title",
             fallback: "表示するプロファイル"
         ))
         profileVisibilityTitle.font = .systemFont(ofSize: 12, weight: .medium)
         menuBarStack.addArrangedSubview(profileVisibilityTitle)
+        settingsMenuBarDependentControls.append(profileVisibilityTitle)
         for account in launcher.accounts {
             let row = NSStackView()
             row.orientation = .horizontal
@@ -3623,23 +3842,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             checkbox.identifier = NSUserInterfaceItemIdentifier(account.id.uuidString)
             checkbox.state = account.showsInMenuBar ? .on : .off
             row.addArrangedSubview(checkbox)
+            settingsMenuBarDependentControls.append(checkbox)
             row.addArrangedSubview(NSView())
             let favorite = NSButton(
-                image: NSImage(systemSymbolName: account.isFavorite ? "star.fill" : "star", accessibilityDescription: nil) ?? NSImage(),
+                image: NSImage(),
                 target: self,
                 action: #selector(toggleMenuBarFavorite(_:))
             )
             favorite.isBordered = false
             favorite.identifier = NSUserInterfaceItemIdentifier(account.id.uuidString)
-            favorite.toolTip = L10n.text("menubar.favorite", fallback: "お気に入りを切り替え")
-            favorite.setAccessibilityLabel(favorite.toolTip!)
+            MenuBarFavoriteButtonPresentation.update(
+                favorite,
+                isFavorite: account.isFavorite
+            )
             row.addArrangedSubview(favorite)
+            settingsMenuBarDependentControls.append(favorite)
             menuBarStack.addArrangedSubview(row)
         }
         let menuBarDescription = NSTextField(
             wrappingLabelWithString: L10n.text(
                 "settings.menubar.description",
-                fallback: "アプリを閉じてもメニューバーに残り、表示中プロファイルの利用状況を確認できます。ログイン時起動と通知は個別に許可を求めます。"
+                fallback: "メニューバーに表示すると、メインウィンドウを閉じても利用状況を確認できます。\n表示するプロファイルと残量表示を個別に設定できます。"
             )
         )
         menuBarDescription.font = .systemFont(ofSize: 12)
@@ -3696,44 +3919,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         rootStack.addArrangedSubview(healthCard)
         healthCard.widthAnchor.constraint(equalTo: rootStack.widthAnchor).isActive = true
 
-        let footerStack = NSStackView()
-        footerStack.orientation = .horizontal
-        footerStack.alignment = .centerY
-        footerStack.spacing = 10
-        footerStack.translatesAutoresizingMaskIntoConstraints = false
-
-        let cancelButton = NSButton(
-            title: L10n.text("common.cancel", fallback: "キャンセル"),
-            target: self,
-            action: #selector(closeSettings)
-        )
-        cancelButton.bezelStyle = .rounded
-
-        let applyButton = NSButton(
-            title: L10n.text("settings.apply", fallback: "適用"),
-            target: self,
-            action: #selector(applySettings)
-        )
-        applyButton.bezelStyle = .rounded
-        applyButton.keyEquivalent = "\r"
-
-        footerStack.addArrangedSubview(NSView())
-        footerStack.addArrangedSubview(cancelButton)
-        footerStack.addArrangedSubview(applyButton)
-        rootStack.addArrangedSubview(footerStack)
-        footerStack.widthAnchor.constraint(equalTo: rootStack.widthAnchor).isActive = true
-
         self.settingsWindow = settingsWindow
-        settingsLanguagePopup = languagePopup
-        settingsUsageNotificationCheckbox = notificationsCheckbox
-        settingsLoginItemCheckbox = loginItemCheckbox
-        settingsCompactUsageCheckbox = compactCheckbox
-        settingsUsageWarningCheckbox = warningCheckbox
-        settingsUsageCriticalCheckbox = criticalCheckbox
         settingsProfileHealthLabel = profileHealthRow.label
         settingsProfileRestoreButton = profileHealthRow.button
         settingsSettingsHealthLabel = settingsHealthRow.label
         settingsSettingsRestoreButton = settingsHealthRow.button
+        setMenuBarDependentControlsEnabled(statusItemCheckbox.state == .on)
         settingsWindow.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
@@ -4060,81 +4251,98 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     }
 
     @objc
-    private func applySettings() {
+    private func changeDisplayLanguageFromSettings(_ sender: NSPopUpButton) {
         guard
-            let selectedIndex = settingsLanguagePopup?.indexOfSelectedItem,
-            AppLanguagePreference.allCases.indices.contains(selectedIndex)
+            AppLanguagePreference.allCases.indices.contains(sender.indexOfSelectedItem)
         else {
             return
         }
 
         let previousLanguage = L10n.language
-        let preference = AppLanguagePreference.allCases[selectedIndex]
+        let preference = AppLanguagePreference.allCases[sender.indexOfSelectedItem]
         L10n.setLanguagePreference(preference)
-        UserDefaults.standard.set(
-            settingsUsageNotificationCheckbox?.state == .on,
-            forKey: usageNotificationsEnabledKey
-        )
-        UserDefaults.standard.set(
-            settingsUsageWarningCheckbox?.state == .on,
-            forKey: usageWarningNotificationsEnabledKey
-        )
-        UserDefaults.standard.set(
-            settingsUsageCriticalCheckbox?.state == .on,
-            forKey: usageCriticalNotificationsEnabledKey
-        )
-        UserDefaults.standard.set(
-            settingsCompactUsageCheckbox?.state == .on,
-            forKey: compactUsageStatusEnabledKey
-        )
-        let wantsLoginItem = settingsLoginItemCheckbox?.state == .on
-        let loginItemIsEnabled = SMAppService.mainApp.status == .enabled
-        if wantsLoginItem != loginItemIsEnabled {
-            do {
-                if wantsLoginItem {
-                    try SMAppService.mainApp.register()
-                } else {
-                    try SMAppService.mainApp.unregister()
-                }
-            } catch {
-                presentWarning(
-                    error.localizedDescription,
-                    title: L10n.text(
-                        "settings.menubar.login-item-error",
-                        fallback: "ログイン時起動を変更できませんでした"
-                    )
-                )
+        guard previousLanguage != L10n.language else {
+            return
+        }
+
+        let settingsFrame = settingsWindow?.frame
+        settingsWindow?.performClose(nil)
+        rebuildInterfaceForLanguageChange()
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.showSettings()
+            if let settingsFrame {
+                self.settingsWindow?.setFrame(settingsFrame, display: true)
             }
         }
+    }
+
+    @objc
+    private func toggleUsageResetNotificationsSetting(_ sender: NSButton) {
+        UserDefaults.standard.set(
+            sender.state == .on,
+            forKey: usageNotificationsEnabledKey
+        )
+        scheduleUsageResetNotificationsForCurrentAccounts()
+    }
+
+    @objc
+    private func toggleUsageWarningSetting(_ sender: NSButton) {
+        UserDefaults.standard.set(
+            sender.state == .on,
+            forKey: usageWarningNotificationsEnabledKey
+        )
+    }
+
+    @objc
+    private func toggleUsageCriticalSetting(_ sender: NSButton) {
+        UserDefaults.standard.set(
+            sender.state == .on,
+            forKey: usageCriticalNotificationsEnabledKey
+        )
+    }
+
+    @objc
+    private func toggleCompactUsageSetting(_ sender: NSButton) {
+        UserDefaults.standard.set(
+            sender.state == .on,
+            forKey: compactUsageStatusEnabledKey
+        )
+        updateStatusItem()
+    }
+
+    @objc
+    private func toggleLoginItemSetting(_ sender: NSButton) {
+        let wantsLoginItem = sender.state == .on
+        let loginItemIsEnabled = SMAppService.mainApp.status == .enabled
+        guard wantsLoginItem != loginItemIsEnabled else {
+            return
+        }
+
+        do {
+            if wantsLoginItem {
+                try SMAppService.mainApp.register()
+            } else {
+                try SMAppService.mainApp.unregister()
+            }
+        } catch {
+            sender.state = loginItemIsEnabled ? .on : .off
+            presentWarning(
+                error.localizedDescription,
+                title: L10n.text(
+                    "settings.launch.login-item-error",
+                    fallback: "ログイン時起動を変更できませんでした"
+                )
+            )
+        }
+    }
+
+    private func scheduleUsageResetNotificationsForCurrentAccounts() {
         scheduleUsageResetNotifications(
             for: launcher.accounts.compactMap { account in
                 guard let snapshot = usageByAccountID[account.id] else { return nil }
                 return (account, snapshot)
             }
-        )
-        let languageChanged = previousLanguage != L10n.language
-        if languageChanged {
-            isRebuildingInterface = true
-        }
-        settingsWindow?.performClose(nil)
-
-        if languageChanged {
-            rebuildInterfaceForLanguageChange()
-            DispatchQueue.main.async { [weak self] in
-                self?.isRebuildingInterface = false
-            }
-        }
-
-        updateStatusItem()
-        if statusPopover?.isShown == true {
-            updateStatusPopover()
-        }
-
-        showTransientStatus(
-            L10n.text(
-                "settings.applied",
-                fallback: "表示言語の設定を適用しました。"
-            )
         )
     }
 
@@ -5587,8 +5795,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             return
         }
 
-        if let account = launcher.accounts.first(where: { $0.id == accountID }) {
-            openOrFocusAccount(account)
+        guard let account = launcher.accounts.first(where: { $0.id == accountID }) else {
+            return
+        }
+
+        // A status-item action is invoked while the transient popover is still
+        // the key window. Close it before asking ChatGPT to become active; on
+        // macOS the two activation requests can otherwise race and the focus
+        // request is rejected even though the ChatGPT process is healthy.
+        statusPopover?.performClose(nil)
+        DispatchQueue.main.async { [weak self] in
+            self?.openOrFocusAccount(account)
         }
     }
 
