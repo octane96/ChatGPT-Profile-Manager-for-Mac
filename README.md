@@ -4,8 +4,6 @@ ChatGPTデスクトップアプリのローカル環境を、プロファイル�
 
 ChatGPT Profile Manager is a macOS app for managing separate local environments for the ChatGPT desktop app. Each profile can keep its own sign-in state, chats, projects, and Codex data so that multiple ChatGPT accounts can be used independently.
 
-**バージョン / Version:** 1.1.2（macOS 14以降 / macOS 14 or later）
-
 > **非公式アプリ / Unofficial app**
 > OpenAIまたはChatGPTの公式製品ではありません。OpenAIの名称・ロゴなど第三者の商標・素材は、このリポジトリのMIT Licenseの対象外です。
 > This project is not an official OpenAI or ChatGPT product. OpenAI and ChatGPT names, logos, and other third-party marks or assets are not covered by this repository's MIT License.
@@ -47,15 +45,15 @@ This is not an account, OS-user, or server-side workspace boundary. Use separate
 
 ### 配布版 / Download
 
-リポジトリの配布用アーカイブをダウンロードして展開し、`ChatGPT Profile Manager.app`を`/Applications`へ移動します。
+GitHub Releasesから配布用アーカイブをダウンロードして展開し、`ChatGPT Profile Manager.app`を`/Applications`へ移動します。
 
-Download the distribution archive from this repository, unpack it, and move `ChatGPT Profile Manager.app` to `/Applications`.
+Download the distribution archive from GitHub Releases, unpack it, and move `ChatGPT Profile Manager.app` to `/Applications`.
 
-- [macOS用アーカイブ / macOS archive](outputs/ChatGPT-Profile-Manager-macOS.zip)
+- [GitHub Releasesからダウンロード / Download from GitHub Releases](https://github.com/octane96/ChatGPT-Profile-Manager-for-Mac/releases/latest)
 
-現在のローカル配布版はad-hoc署名です。初回起動時にmacOSの警告が表示される場合があります。Developer ID署名と公証を行ったリリースは別途提供します。
+公開Releaseはad-hoc署名です。初回起動時にmacOSの警告が表示される場合があります。Developer ID署名と公証を行ったリリースは今後提供予定です。
 
-The current local distribution is ad-hoc signed. macOS may show a warning on first launch. A Developer ID-signed and notarized release will be provided separately.
+Public releases are ad-hoc signed. macOS may show a warning on first launch. A Developer ID-signed and notarized release is planned for a future release.
 
 ### Homebrew
 
