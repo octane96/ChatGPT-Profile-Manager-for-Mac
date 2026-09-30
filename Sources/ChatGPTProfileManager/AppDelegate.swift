@@ -211,6 +211,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     private var usageRefreshTask: Task<Void, Never>?
     private var statusItem: NSStatusItem?
     private var statusPopover: NSPopover?
+    private var statusPopoverDismissal: StatusPopoverDismissal?
     private var statusPopoverDocument: NSView?
     private var statusPopoverStack: NSStackView?
     private weak var statusUsageLabel: MenuBarUsageLabel?
@@ -282,6 +283,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         // below, so an animated resize only looks like a flash to the user.
         popover.animates = false
         statusPopover = popover
+        statusPopoverDismissal = StatusPopoverDismissal(popover: popover, statusButton: button)
         updateStatusItem()
     }
 
@@ -296,6 +298,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
 
     private func removeStatusItem() {
         statusPopover?.performClose(nil)
+        statusPopoverDismissal?.stopMonitoring()
+        statusPopoverDismissal = nil
         if let statusItem {
             NSStatusBar.system.removeStatusItem(statusItem)
         }
@@ -308,7 +312,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
 
     private func startUsageRefreshTimer() {
         usageRefreshTimer?.invalidate()
-        usageRefreshTimer = Timer.scheduledTimer(withTimeInterval: 15 * 60, repeats: true) { [weak self] _ in
+        usageRefreshTimer = Timer.scheduledTimer(withTimeInterval: 3 * 60, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.refreshUsage()
             }
@@ -318,6 +322,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     @objc
     private func systemDidWake(_ notification: Notification) {
         refreshUsage()
+    }
+
+    @objc
+    private func workspaceApplicationDidActivate(_ notification: Notification) {
+        guard let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+              application.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return }
+        statusPopover?.performClose(nil)
     }
 
     private var menuBarAccounts: [AccountProfile] {
@@ -351,7 +362,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             return
         }
 
-        let accounts = menuBarAccounts
+        let accounts = MenuBarPreferences.statusAccounts(
+            from: launcher.accounts,
+            in: UserDefaults.standard
+        )
         let summary = MenuBarUsageSummary.minimum(
             accountIDs: accounts.map(\.id),
             snapshots: usageByAccountID
@@ -367,12 +381,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         if let labelWidth = statusUsageLabel?.fittingSize.width {
             statusItem?.length = max(NSStatusBar.system.thickness, ceil(labelWidth))
         }
-        let scope = L10n.text(
+        let selectedAccount = accounts.first.flatMap { account in
+            MenuBarPreferences.statusAccountID(in: UserDefaults.standard) == account.id ? account : nil
+        }
+        let scope = selectedAccount.map {
+            L10n.text(
+                "menubar.selected-profile-tooltip",
+                fallback: "{name}の残量",
+                replacing: ["name": $0.name]
+            )
+        } ?? L10n.text(
             "menubar.scope-tooltip",
             fallback: "表示中の{count}プロファイルの最小残量",
             replacing: ["count": "\(accounts.count)"]
         )
-        let updated = lastUsageRefreshAt.map { formatFetchDate($0) }
+        let updatedAt = selectedAccount.flatMap { usageLastUpdatedAt[$0.id] } ?? (selectedAccount == nil ? lastUsageRefreshAt : nil)
+        let updated = updatedAt.map { formatFetchDate($0) }
             ?? L10n.text("common.unknown", fallback: "不明")
         button.toolTip = "\(scope)（\(L10n.text("usage.last-updated", fallback: "最終確認: {date}", replacing: ["date": updated]))）"
     }
@@ -380,12 +404,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     @objc
     private func toggleStatusPopover() {
         guard let popover = statusPopover, let button = statusItem?.button else { return }
+        refreshUsage()
         if popover.isShown {
             popover.performClose(nil)
             return
-        }
-        if lastUsageRefreshAt == nil || Date().timeIntervalSince(lastUsageRefreshAt ?? .distantPast) > 5 * 60 {
-            refreshUsage()
         }
         updateStatusPopover()
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
@@ -753,6 +775,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             name: NSWorkspace.didWakeNotification,
             object: nil
         )
+        workspaceNotifications.addObserver(
+            self,
+            selector: #selector(workspaceApplicationDidActivate(_:)),
+            name: NSWorkspace.didActivateApplicationNotification,
+            object: nil
+        )
         // SMAppService launches the app in the background at login. Keep the
         // menu bar item available without surfacing the main window only when
         // the user has enabled menu bar display; otherwise keep the app
@@ -784,6 +812,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     func applicationDidBecomeActive(_ notification: Notification) {
         refreshUI()
         refreshUsage()
+    }
+
+    func applicationDidResignActive(_ notification: Notification) {
+        statusPopover?.performClose(nil)
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -3889,7 +3921,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         let compactCheckbox = NSButton(
             checkboxWithTitle: L10n.text(
                 "settings.menubar.compact",
-                fallback: "メニューバーに残量を表示（最小値）"
+                fallback: "メニューバーに残量を表示"
             ),
             target: self,
             action: #selector(toggleCompactUsageSetting(_:))
@@ -3897,9 +3929,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         compactCheckbox.state = compactUsageStatusEnabled ? .on : .off
         menuBarStack.addArrangedSubview(compactCheckbox)
         settingsMenuBarDependentControls.append(compactCheckbox)
+        let statusProfileTitle = NSTextField(labelWithString: L10n.text(
+            "settings.menubar.status-profile-title",
+            fallback: "残量を表示するプロファイル"
+        ))
+        statusProfileTitle.font = .systemFont(ofSize: 12, weight: .medium)
+        menuBarStack.addArrangedSubview(statusProfileTitle)
+        settingsMenuBarDependentControls.append(statusProfileTitle)
+        let statusProfileSelector = NSPopUpButton()
+        statusProfileSelector.target = self
+        statusProfileSelector.action = #selector(changeMenuBarStatusProfile(_:))
+        statusProfileSelector.addItem(withTitle: L10n.text(
+            "settings.menubar.status-profile-automatic",
+            fallback: "表示中プロファイルの最小値（自動）"
+        ))
+        let selectedStatusAccountID = MenuBarPreferences.statusAccountID(in: UserDefaults.standard)
+        for account in launcher.accounts {
+            statusProfileSelector.addItem(withTitle: account.name)
+            statusProfileSelector.lastItem?.representedObject = account.id
+            if account.id == selectedStatusAccountID {
+                statusProfileSelector.select(statusProfileSelector.lastItem)
+            }
+        }
+        statusProfileSelector.setAccessibilityLabel(statusProfileTitle.stringValue)
+        menuBarStack.addArrangedSubview(statusProfileSelector)
+        settingsMenuBarDependentControls.append(statusProfileSelector)
+        statusProfileSelector.widthAnchor.constraint(equalTo: menuBarStack.widthAnchor).isActive = true
         let profileVisibilityTitle = NSTextField(labelWithString: L10n.text(
             "settings.menubar.profiles-title",
-            fallback: "表示するプロファイル"
+            fallback: "ポップアップに表示するプロファイル"
         ))
         profileVisibilityTitle.font = .systemFont(ofSize: 12, weight: .medium)
         menuBarStack.addArrangedSubview(profileVisibilityTitle)
@@ -3937,7 +3995,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         let menuBarDescription = NSTextField(
             wrappingLabelWithString: L10n.text(
                 "settings.menubar.description",
-                fallback: "メニューバーに表示すると、メインウィンドウを閉じても利用状況を確認できます。\n表示するプロファイルと残量表示を個別に設定できます。"
+                fallback: "メニューバーの残量は指定した1件、または表示中プロファイルの最小値を表示します。\nポップアップの表示対象は個別に設定できます。"
             )
         )
         menuBarDescription.font = .systemFont(ofSize: 12)
@@ -4390,6 +4448,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         UserDefaults.standard.set(
             sender.state == .on,
             forKey: compactUsageStatusEnabledKey
+        )
+        updateStatusItem()
+    }
+
+    @objc
+    private func changeMenuBarStatusProfile(_ sender: NSPopUpButton) {
+        MenuBarPreferences.setStatusAccountID(
+            sender.selectedItem?.representedObject as? UUID,
+            in: UserDefaults.standard
         )
         updateStatusItem()
     }
