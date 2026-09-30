@@ -215,6 +215,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     private var statusPopoverDocument: NSView?
     private var statusPopoverStack: NSStackView?
     private weak var statusUsageLabel: MenuBarUsageLabel?
+    private weak var statusPopoverProfileSelector: NSPopUpButton?
+    private weak var settingsStatusProfileSelector: NSPopUpButton?
     private let menuBarIcon = MenuBarIcon.make()
     private var explicitTerminationRequested = false
     private var mainWindowHiddenAt: Date?
@@ -308,6 +310,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         statusPopoverDocument = nil
         statusPopoverStack = nil
         statusUsageLabel = nil
+        statusPopoverProfileSelector = nil
     }
 
     private func startUsageRefreshTimer() {
@@ -494,6 +497,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         header.addArrangedSubview(mainButton)
         stack.addArrangedSubview(header)
         header.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+
+        let profileSelection = NSStackView()
+        profileSelection.orientation = .vertical
+        profileSelection.alignment = .leading
+        profileSelection.spacing = 4
+        let profileTitle = NSTextField(labelWithString: L10n.text(
+            "settings.menubar.status-profile-title",
+            fallback: "残量を表示するプロファイル"
+        ))
+        profileTitle.font = .systemFont(ofSize: 11, weight: .medium)
+        profileSelection.addArrangedSubview(profileTitle)
+        let profileSelector = makeMenuBarStatusProfileSelector()
+        profileSelector.controlSize = .small
+        statusPopoverProfileSelector = profileSelector
+        profileSelection.addArrangedSubview(profileSelector)
+        stack.addArrangedSubview(profileSelection)
+        profileSelection.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        profileSelector.widthAnchor.constraint(equalTo: profileSelection.widthAnchor).isActive = true
 
         let accounts = menuBarAccounts
         if accounts.isEmpty {
@@ -1337,6 +1358,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         tableView?.reloadData()
         updateTableHeight(accountCount: accounts.count)
         updateControlAvailability()
+        for selector in [settingsStatusProfileSelector, statusPopoverProfileSelector].compactMap({ $0 }) {
+            populateMenuBarStatusProfileSelector(selector)
+        }
         updateStatusItem()
     }
 
@@ -3936,22 +3960,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         statusProfileTitle.font = .systemFont(ofSize: 12, weight: .medium)
         menuBarStack.addArrangedSubview(statusProfileTitle)
         settingsMenuBarDependentControls.append(statusProfileTitle)
-        let statusProfileSelector = NSPopUpButton()
-        statusProfileSelector.target = self
-        statusProfileSelector.action = #selector(changeMenuBarStatusProfile(_:))
-        statusProfileSelector.addItem(withTitle: L10n.text(
-            "settings.menubar.status-profile-automatic",
-            fallback: "表示中プロファイルの最小値（自動）"
-        ))
-        let selectedStatusAccountID = MenuBarPreferences.statusAccountID(in: UserDefaults.standard)
-        for account in launcher.accounts {
-            statusProfileSelector.addItem(withTitle: account.name)
-            statusProfileSelector.lastItem?.representedObject = account.id
-            if account.id == selectedStatusAccountID {
-                statusProfileSelector.select(statusProfileSelector.lastItem)
-            }
-        }
-        statusProfileSelector.setAccessibilityLabel(statusProfileTitle.stringValue)
+        let statusProfileSelector = makeMenuBarStatusProfileSelector()
+        settingsStatusProfileSelector = statusProfileSelector
         menuBarStack.addArrangedSubview(statusProfileSelector)
         settingsMenuBarDependentControls.append(statusProfileSelector)
         statusProfileSelector.widthAnchor.constraint(equalTo: menuBarStack.widthAnchor).isActive = true
@@ -4452,12 +4462,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         updateStatusItem()
     }
 
+    private func makeMenuBarStatusProfileSelector() -> NSPopUpButton {
+        let selector = NSPopUpButton()
+        selector.target = self
+        selector.action = #selector(changeMenuBarStatusProfile(_:))
+        selector.setAccessibilityLabel(L10n.text(
+            "settings.menubar.status-profile-title",
+            fallback: "残量を表示するプロファイル"
+        ))
+        populateMenuBarStatusProfileSelector(selector)
+        return selector
+    }
+
+    private func populateMenuBarStatusProfileSelector(_ selector: NSPopUpButton) {
+        selector.removeAllItems()
+        selector.addItem(withTitle: L10n.text(
+            "settings.menubar.status-profile-automatic",
+            fallback: "表示中プロファイルの最小値（自動）"
+        ))
+        for account in launcher.accounts {
+            selector.addItem(withTitle: account.name)
+            selector.lastItem?.representedObject = account.id
+        }
+        selectCurrentMenuBarStatusProfile(in: selector)
+    }
+
+    private func selectCurrentMenuBarStatusProfile(in selector: NSPopUpButton) {
+        let selectedID = MenuBarPreferences.statusAccountID(in: UserDefaults.standard)
+        let selectedItem = selectedID.flatMap { id in
+            selector.itemArray.first { ($0.representedObject as? UUID) == id }
+        } ?? selector.itemArray.first
+        selector.select(selectedItem)
+    }
+
     @objc
     private func changeMenuBarStatusProfile(_ sender: NSPopUpButton) {
         MenuBarPreferences.setStatusAccountID(
             sender.selectedItem?.representedObject as? UUID,
             in: UserDefaults.standard
         )
+        for selector in [settingsStatusProfileSelector, statusPopoverProfileSelector].compactMap({ $0 }) {
+            selectCurrentMenuBarStatusProfile(in: selector)
+        }
         updateStatusItem()
     }
 
