@@ -1021,6 +1021,15 @@ final class ChatGPTProfileManagerTests: XCTestCase {
         XCTAssertEqual(snapshot.displayPlanName, "Pro")
     }
 
+    func testProLiteAPIPlanUsesReadableProDisplayName() throws {
+        let response = Data(#"""
+        {"result":{"rateLimits":{"planType":"prolite","primary":{"usedPercent":33,"windowDurationMins":10080}}}}
+        """#.utf8)
+        let snapshot = try XCTUnwrap(AccountUsageSnapshot(jsonData: response))
+        XCTAssertEqual(snapshot.planType, "prolite")
+        XCTAssertEqual(snapshot.displayPlanName, "Pro")
+    }
+
     func testProWeeklyOnlyResponseDoesNotAppearAsFiveHourUsage() throws {
         let response = Data(#"""
         {"result":{"rateLimits":{"planType":"pro","primary":{"usedPercent":33,"windowDurationMins":10080,"resetsAt":1788755352},"secondary":null}}}

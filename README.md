@@ -255,9 +255,9 @@ Launch apps invoke the installed ChatGPT.app. They do not clone, replace, or re-
 
 ## 利用状況と通知 / Usage and notifications
 
-プロファイルカードには、取得できた場合にプラン名、5時間枠、Weekly枠、上限リセットクレジットを表示します。割合は残りの割合です。5H・WeeklyはAPIの枠の長さで判定し、該当する枠が返らない場合は`—`を表示します。
+プロファイルカードには、取得できた場合にプラン名、5時間枠、Weekly枠、上限リセットクレジットを表示します。Proプランの内部名`prolite`も画面上は`Pro`と表示します。割合は残りの割合です。5H・WeeklyはAPIの枠の長さで判定し、該当する枠が返らない場合は`—`を表示します。
 
-When available, profile cards show the plan, five-hour window, Weekly window, and limit-reset credits. Percentages indicate the remaining amount. Five-hour and Weekly windows are identified by their duration; a missing window is shown as `—`.
+When available, profile cards show the plan, five-hour window, Weekly window, and limit-reset credits. The internal Pro plan name `prolite` is displayed as `Pro`. Percentages indicate the remaining amount. Five-hour and Weekly windows are identified by their duration; a missing window is shown as `—`.
 
 - 5H：残り%と24時間表記のリセット時刻 / 5H: remaining percentage and reset time in 24-hour format
 - Weekly：残り%と月日・24時間表記のリセット時刻 / Weekly: remaining percentage and reset date/time
