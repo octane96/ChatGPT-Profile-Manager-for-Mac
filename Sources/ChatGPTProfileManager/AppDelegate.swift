@@ -215,6 +215,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     private var statusPopoverDocument: NSView?
     private var statusPopoverStack: NSStackView?
     private weak var statusUsageLabel: MenuBarUsageLabel?
+    private weak var statusPopoverProfileSelector: NSPopUpButton?
+    private weak var settingsStatusProfileSelector: NSPopUpButton?
     private let menuBarIcon = MenuBarIcon.make()
     private var explicitTerminationRequested = false
     private var mainWindowHiddenAt: Date?
@@ -308,6 +310,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         statusPopoverDocument = nil
         statusPopoverStack = nil
         statusUsageLabel = nil
+        statusPopoverProfileSelector = nil
     }
 
     private func startUsageRefreshTimer() {
@@ -476,13 +479,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         title.font = .systemFont(ofSize: 15, weight: .semibold)
         header.addArrangedSubview(title)
         header.addArrangedSubview(NSView())
+        let isRefreshing = usageFetchStates.values.contains { $0 == .loading }
+        let refreshTitle = L10n.text("usage.refresh", fallback: "更新")
+        let refreshingTitle = L10n.text("menubar.refreshing", fallback: "確認中…")
         let refreshButton = NSButton(
-            title: L10n.text("usage.refresh", fallback: "更新"),
+            title: refreshTitle,
             target: self,
             action: #selector(refreshUsageFromStatus(_:))
         )
         refreshButton.bezelStyle = .rounded
         refreshButton.controlSize = .small
+        // Reserve the wider localized title so refreshing cannot move the
+        // header controls or change their click targets.
+        let idleButtonWidth = refreshButton.fittingSize.width
+        refreshButton.title = refreshingTitle
+        let refreshingButtonWidth = refreshButton.fittingSize.width
+        refreshButton.widthAnchor.constraint(equalToConstant: ceil(max(idleButtonWidth, refreshingButtonWidth))).isActive = true
+        refreshButton.title = isRefreshing ? refreshingTitle : refreshTitle
+        refreshButton.isEnabled = !isRefreshing
         header.addArrangedSubview(refreshButton)
         let mainButton = NSButton(
             title: L10n.text("menubar.open-main", fallback: "メイン画面"),
@@ -494,6 +508,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         header.addArrangedSubview(mainButton)
         stack.addArrangedSubview(header)
         header.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+
+        let profileSelection = NSStackView()
+        profileSelection.orientation = .vertical
+        profileSelection.alignment = .leading
+        profileSelection.spacing = 4
+        let profileTitle = NSTextField(labelWithString: L10n.text(
+            "settings.menubar.status-profile-title",
+            fallback: "残量を表示するプロファイル"
+        ))
+        profileTitle.font = .systemFont(ofSize: 11, weight: .medium)
+        profileSelection.addArrangedSubview(profileTitle)
+        let profileSelector = makeMenuBarStatusProfileSelector()
+        profileSelector.controlSize = .small
+        statusPopoverProfileSelector = profileSelector
+        profileSelection.addArrangedSubview(profileSelector)
+        stack.addArrangedSubview(profileSelection)
+        profileSelection.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        profileSelector.widthAnchor.constraint(equalTo: profileSelection.widthAnchor).isActive = true
 
         let accounts = menuBarAccounts
         if accounts.isEmpty {
@@ -641,32 +673,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
 
         let updatedAt = usageLastUpdatedAt[account.id].map { formatFetchDate($0) }
             ?? L10n.text("common.unknown", fallback: "不明")
-        let updated = NSTextField(labelWithString: L10n.text(
+        let updatedText = NSMutableAttributedString(string: L10n.text(
             "usage.last-updated",
             fallback: "最終確認: {date}",
             replacing: ["date": updatedAt]
-        ))
-        updated.font = .systemFont(ofSize: 10)
-        updated.textColor = .tertiaryLabelColor
-        stack.addArrangedSubview(updated)
+        ), attributes: [.font: NSFont.systemFont(ofSize: 10), .foregroundColor: NSColor.tertiaryLabelColor])
         if case .loading = usageFetchStates[account.id] {
-            let loading = NSTextField(labelWithString: L10n.text(
+            updatedText.append(NSAttributedString(string: " " + L10n.text(
                 "usage.fetching",
                 fallback: "（確認中…）"
-            ))
-            loading.font = .systemFont(ofSize: 10)
-            loading.textColor = .secondaryLabelColor
-            stack.addArrangedSubview(loading)
+            ), attributes: [.font: NSFont.systemFont(ofSize: 10), .foregroundColor: NSColor.secondaryLabelColor]))
         }
         if case .failed = usageFetchStates[account.id] {
-            let failed = NSTextField(labelWithString: L10n.text(
+            updatedText.append(NSAttributedString(string: " " + L10n.text(
                 "usage.fetch-failed",
                 fallback: "（確認に失敗）"
-            ))
-            failed.font = .systemFont(ofSize: 10, weight: .medium)
-            failed.textColor = .systemOrange
-            stack.addArrangedSubview(failed)
+            ), attributes: [.font: NSFont.systemFont(ofSize: 10, weight: .medium), .foregroundColor: NSColor.systemOrange]))
         }
+        // Refresh state shares the existing timestamp line; adding/removing
+        // a row would resize every card and move the popover's footer.
+        let updated = NSTextField(labelWithAttributedString: updatedText)
+        updated.maximumNumberOfLines = 1
+        updated.lineBreakMode = .byTruncatingTail
+        updated.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        stack.addArrangedSubview(updated)
+        updated.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         return card
     }
 
@@ -1337,6 +1368,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         tableView?.reloadData()
         updateTableHeight(accountCount: accounts.count)
         updateControlAvailability()
+        for selector in [settingsStatusProfileSelector, statusPopoverProfileSelector].compactMap({ $0 }) {
+            populateMenuBarStatusProfileSelector(selector)
+        }
         updateStatusItem()
     }
 
@@ -1368,6 +1402,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
 
         usageFetchStates = Dictionary(uniqueKeysWithValues: accountHomes.map { ($0.accountID, .loading) })
         tableView?.reloadData()
+        if statusPopover?.isShown == true {
+            updateStatusPopover()
+        }
 
         usageRefreshTask = Task { [weak self] in
             var snapshots: [UUID: AccountUsageSnapshot] = [:]
@@ -3936,22 +3973,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         statusProfileTitle.font = .systemFont(ofSize: 12, weight: .medium)
         menuBarStack.addArrangedSubview(statusProfileTitle)
         settingsMenuBarDependentControls.append(statusProfileTitle)
-        let statusProfileSelector = NSPopUpButton()
-        statusProfileSelector.target = self
-        statusProfileSelector.action = #selector(changeMenuBarStatusProfile(_:))
-        statusProfileSelector.addItem(withTitle: L10n.text(
-            "settings.menubar.status-profile-automatic",
-            fallback: "表示中プロファイルの最小値（自動）"
-        ))
-        let selectedStatusAccountID = MenuBarPreferences.statusAccountID(in: UserDefaults.standard)
-        for account in launcher.accounts {
-            statusProfileSelector.addItem(withTitle: account.name)
-            statusProfileSelector.lastItem?.representedObject = account.id
-            if account.id == selectedStatusAccountID {
-                statusProfileSelector.select(statusProfileSelector.lastItem)
-            }
-        }
-        statusProfileSelector.setAccessibilityLabel(statusProfileTitle.stringValue)
+        let statusProfileSelector = makeMenuBarStatusProfileSelector()
+        settingsStatusProfileSelector = statusProfileSelector
         menuBarStack.addArrangedSubview(statusProfileSelector)
         settingsMenuBarDependentControls.append(statusProfileSelector)
         statusProfileSelector.widthAnchor.constraint(equalTo: menuBarStack.widthAnchor).isActive = true
@@ -4452,12 +4475,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         updateStatusItem()
     }
 
+    private func makeMenuBarStatusProfileSelector() -> NSPopUpButton {
+        let selector = NSPopUpButton()
+        selector.target = self
+        selector.action = #selector(changeMenuBarStatusProfile(_:))
+        selector.setAccessibilityLabel(L10n.text(
+            "settings.menubar.status-profile-title",
+            fallback: "残量を表示するプロファイル"
+        ))
+        populateMenuBarStatusProfileSelector(selector)
+        return selector
+    }
+
+    private func populateMenuBarStatusProfileSelector(_ selector: NSPopUpButton) {
+        selector.removeAllItems()
+        selector.addItem(withTitle: L10n.text(
+            "settings.menubar.status-profile-automatic",
+            fallback: "表示中プロファイルの最小値（自動）"
+        ))
+        for account in launcher.accounts {
+            selector.addItem(withTitle: account.name)
+            selector.lastItem?.representedObject = account.id
+        }
+        selectCurrentMenuBarStatusProfile(in: selector)
+    }
+
+    private func selectCurrentMenuBarStatusProfile(in selector: NSPopUpButton) {
+        let selectedID = MenuBarPreferences.statusAccountID(in: UserDefaults.standard)
+        let selectedItem = selectedID.flatMap { id in
+            selector.itemArray.first { ($0.representedObject as? UUID) == id }
+        } ?? selector.itemArray.first
+        selector.select(selectedItem)
+    }
+
     @objc
     private func changeMenuBarStatusProfile(_ sender: NSPopUpButton) {
         MenuBarPreferences.setStatusAccountID(
             sender.selectedItem?.representedObject as? UUID,
             in: UserDefaults.standard
         )
+        for selector in [settingsStatusProfileSelector, statusPopoverProfileSelector].compactMap({ $0 }) {
+            selectCurrentMenuBarStatusProfile(in: selector)
+        }
         updateStatusItem()
     }
 

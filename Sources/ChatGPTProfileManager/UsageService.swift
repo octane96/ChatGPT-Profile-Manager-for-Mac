@@ -201,7 +201,7 @@ struct AccountUsageSnapshot: Equatable, Sendable {
             return "Free"
         case "plus":
             return "Plus"
-        case "pro":
+        case "pro", "prolite":
             return "Pro"
         case "team":
             return "Team"

@@ -332,6 +332,7 @@
 "menubar.scope-tooltip" = "Minimum remaining amount across {count} visible profiles";
 "menubar.selected-profile-tooltip" = "Remaining usage for {name}";
 "menubar.title" = "Usage";
+"menubar.refreshing" = "Checking…";
 "menubar.open-main" = "Main Window";
 "menubar.no-profiles" = "No profiles are shown in the menu bar. Use a profile’s … menu in the main window to enable visibility.";
 "menubar.settings" = "Settings";
