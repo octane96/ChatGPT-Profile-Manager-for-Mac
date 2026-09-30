@@ -479,13 +479,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         title.font = .systemFont(ofSize: 15, weight: .semibold)
         header.addArrangedSubview(title)
         header.addArrangedSubview(NSView())
+        let isRefreshing = usageFetchStates.values.contains { $0 == .loading }
+        let refreshTitle = L10n.text("usage.refresh", fallback: "更新")
+        let refreshingTitle = L10n.text("menubar.refreshing", fallback: "確認中…")
         let refreshButton = NSButton(
-            title: L10n.text("usage.refresh", fallback: "更新"),
+            title: refreshTitle,
             target: self,
             action: #selector(refreshUsageFromStatus(_:))
         )
         refreshButton.bezelStyle = .rounded
         refreshButton.controlSize = .small
+        // Reserve the wider localized title so refreshing cannot move the
+        // header controls or change their click targets.
+        let idleButtonWidth = refreshButton.fittingSize.width
+        refreshButton.title = refreshingTitle
+        let refreshingButtonWidth = refreshButton.fittingSize.width
+        refreshButton.widthAnchor.constraint(equalToConstant: ceil(max(idleButtonWidth, refreshingButtonWidth))).isActive = true
+        refreshButton.title = isRefreshing ? refreshingTitle : refreshTitle
+        refreshButton.isEnabled = !isRefreshing
         header.addArrangedSubview(refreshButton)
         let mainButton = NSButton(
             title: L10n.text("menubar.open-main", fallback: "メイン画面"),
@@ -662,32 +673,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
 
         let updatedAt = usageLastUpdatedAt[account.id].map { formatFetchDate($0) }
             ?? L10n.text("common.unknown", fallback: "不明")
-        let updated = NSTextField(labelWithString: L10n.text(
+        let updatedText = NSMutableAttributedString(string: L10n.text(
             "usage.last-updated",
             fallback: "最終確認: {date}",
             replacing: ["date": updatedAt]
-        ))
-        updated.font = .systemFont(ofSize: 10)
-        updated.textColor = .tertiaryLabelColor
-        stack.addArrangedSubview(updated)
+        ), attributes: [.font: NSFont.systemFont(ofSize: 10), .foregroundColor: NSColor.tertiaryLabelColor])
         if case .loading = usageFetchStates[account.id] {
-            let loading = NSTextField(labelWithString: L10n.text(
+            updatedText.append(NSAttributedString(string: " " + L10n.text(
                 "usage.fetching",
                 fallback: "（確認中…）"
-            ))
-            loading.font = .systemFont(ofSize: 10)
-            loading.textColor = .secondaryLabelColor
-            stack.addArrangedSubview(loading)
+            ), attributes: [.font: NSFont.systemFont(ofSize: 10), .foregroundColor: NSColor.secondaryLabelColor]))
         }
         if case .failed = usageFetchStates[account.id] {
-            let failed = NSTextField(labelWithString: L10n.text(
+            updatedText.append(NSAttributedString(string: " " + L10n.text(
                 "usage.fetch-failed",
                 fallback: "（確認に失敗）"
-            ))
-            failed.font = .systemFont(ofSize: 10, weight: .medium)
-            failed.textColor = .systemOrange
-            stack.addArrangedSubview(failed)
+            ), attributes: [.font: NSFont.systemFont(ofSize: 10, weight: .medium), .foregroundColor: NSColor.systemOrange]))
         }
+        // Refresh state shares the existing timestamp line; adding/removing
+        // a row would resize every card and move the popover's footer.
+        let updated = NSTextField(labelWithAttributedString: updatedText)
+        updated.maximumNumberOfLines = 1
+        updated.lineBreakMode = .byTruncatingTail
+        updated.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        stack.addArrangedSubview(updated)
+        updated.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         return card
     }
 
@@ -1392,6 +1402,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
 
         usageFetchStates = Dictionary(uniqueKeysWithValues: accountHomes.map { ($0.accountID, .loading) })
         tableView?.reloadData()
+        if statusPopover?.isShown == true {
+            updateStatusPopover()
+        }
 
         usageRefreshTask = Task { [weak self] in
             var snapshots: [UUID: AccountUsageSnapshot] = [:]

@@ -265,11 +265,15 @@ When available, profile cards show the plan, five-hour window, Weekly window, an
 
 メインウィンドウを閉じても、メニューバーから利用状況を確認できます。メニューバー項目自体は設定から表示・非表示を切り替えられます。「設定 → メニューバー → 残量を表示するプロファイル」で特定の1件を指定できます。この選択はポップアップの表示対象と独立して保存され、選択したプロファイルを削除すると最小値表示に戻ります。初期状態では表示対象プロファイルの最小残量を2行（`5h 33%`、`W 48%`）で表示し、残量表示中はアイコンを表示しません。残量表示をオフにした場合は、`Resources/AppIcon.icns`のP型ロゴを元にした透明背景・単色のメニューバー専用アイコンを表示します。表示はメニューバー内で上下中央に揃え、左右に不要な余白を設けません。ポップオーバーには表示対象プロファイルごとの5H、Weekly、上限リセット件数と有効期限、最終確認時刻を表示します。上限リセットの詳細は折り畳み（初期状態）で、プロファイルのお気に入り・表示/非表示はメイン画面の設定から変更します。ポップアップ外をクリックすると閉じます。明示的に「終了」した場合はメニューバー項目も終了します。
 
-アプリ起動時、前面表示時、スリープ復帰時、手動更新時、メニューバー項目をクリックしたときに全プロファイルを更新し、通常は3分間隔でも更新します。メニューバー項目のクリックでは、直前の更新からの経過時間にかかわらず更新します。取得に失敗しても直前の成功値を保持し、失敗状態と最終確認時刻を表示します。
+ポップアップ上部の「残量を表示するプロファイル」でも、現在の選択を確認・変更できます。設定画面と同じ選択を保存し、両方の表示を同期します。
+
+アプリ起動時、前面表示時、スリープ復帰時、手動更新時、メニューバー項目をクリックしたときに全プロファイルを更新し、通常は3分間隔でも更新します。メニューバー項目のクリックでは、直前の更新からの経過時間にかかわらず更新します。ポップアップでは更新開始時から「確認中…」を表示し、取得中は更新ボタンを無効にします。確認状態は最終確認時刻と同じ行に表示し、更新ボタンの幅も一定に保つため、更新状態だけの変化ではレイアウトが動きません。取得に失敗しても直前の成功値を保持し、失敗状態と最終確認時刻を表示します。
 
 The app remains available from the menu bar after the main window closes. The menu bar item itself can be shown or hidden from Settings. Select one profile under **Settings → Menu Bar → Profile for remaining usage**. The selection is saved independently of popover visibility; removing the selected profile restores the minimum display. By default, it shows the minimum remaining amount across visible profiles on two lines (`5h 33%` and `W 48%`); no icon is shown while the remaining-usage text is enabled. When the text is disabled, a compact monochrome, transparent-background menu bar icon generated from the P mark in `Resources/AppIcon.icns` is shown instead of the full app icon. The content is vertically centered with no unnecessary left/right padding. Its popover shows each visible profile’s five-hour window, Weekly window, limit-reset count and expiration, and last successful check. Limit-reset details are collapsed by default; favorite and visibility are managed from the main window’s settings. Clicking outside the popover closes it. Choosing **Quit** explicitly ends the manager and removes the menu bar item.
 
-Usage refreshes at launch, activation, wake, manual refresh, and each click of the menu bar item, plus every 3 minutes while running. Menu bar clicks refresh usage regardless of how recently the previous refresh completed. A failed fetch retains the last successful value and reports the failure separately.
+The **Profile for remaining usage** selector at the top of the popover also shows and changes the current selection. It shares the saved selection with Settings, and both controls stay in sync.
+
+Usage refreshes at launch, activation, wake, manual refresh, and each click of the menu bar item, plus every 3 minutes while running. Menu bar clicks refresh usage regardless of how recently the previous refresh completed. The popover shows **Checking…** immediately when a refresh starts and disables the refresh button until it finishes. Refresh status shares the last-check line, and the refresh button keeps a constant width, so refresh-state changes do not move the layout. A failed fetch retains the last successful value and reports the failure separately.
 
 予定外のリセット検知は、アプリが利用状況を更新したときに前回値と今回値を比較します。Weeklyの予定時刻がまだ先なのに使用率が下がり、次のリセット時刻へ移った場合に通知します。
 
