@@ -211,6 +211,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     private var usageRefreshTask: Task<Void, Never>?
     private var statusItem: NSStatusItem?
     private var statusPopover: NSPopover?
+    private var statusPopoverDismissal: StatusPopoverDismissal?
     private var statusPopoverDocument: NSView?
     private var statusPopoverStack: NSStackView?
     private weak var statusUsageLabel: MenuBarUsageLabel?
@@ -282,6 +283,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         // below, so an animated resize only looks like a flash to the user.
         popover.animates = false
         statusPopover = popover
+        statusPopoverDismissal = StatusPopoverDismissal(popover: popover, statusButton: button)
         updateStatusItem()
     }
 
@@ -296,6 +298,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
 
     private func removeStatusItem() {
         statusPopover?.performClose(nil)
+        statusPopoverDismissal?.stopMonitoring()
+        statusPopoverDismissal = nil
         if let statusItem {
             NSStatusBar.system.removeStatusItem(statusItem)
         }
@@ -318,6 +322,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     @objc
     private func systemDidWake(_ notification: Notification) {
         refreshUsage()
+    }
+
+    @objc
+    private func workspaceApplicationDidActivate(_ notification: Notification) {
+        guard let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+              application.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return }
+        statusPopover?.performClose(nil)
     }
 
     private var menuBarAccounts: [AccountProfile] {
@@ -766,6 +777,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             name: NSWorkspace.didWakeNotification,
             object: nil
         )
+        workspaceNotifications.addObserver(
+            self,
+            selector: #selector(workspaceApplicationDidActivate(_:)),
+            name: NSWorkspace.didActivateApplicationNotification,
+            object: nil
+        )
         // SMAppService launches the app in the background at login. Keep the
         // menu bar item available without surfacing the main window only when
         // the user has enabled menu bar display; otherwise keep the app
@@ -797,6 +814,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     func applicationDidBecomeActive(_ notification: Notification) {
         refreshUI()
         refreshUsage()
+    }
+
+    func applicationDidResignActive(_ notification: Notification) {
+        statusPopover?.performClose(nil)
     }
 
     func applicationWillTerminate(_ notification: Notification) {
