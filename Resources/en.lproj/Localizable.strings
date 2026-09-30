@@ -330,6 +330,7 @@
 "menubar.accessibility-label" = "ChatGPT Profile Manager usage";
 "menubar.tooltip" = "Show ChatGPT Profile Manager usage";
 "menubar.scope-tooltip" = "Minimum remaining amount across {count} visible profiles";
+"menubar.selected-profile-tooltip" = "Remaining usage for {name}";
 "menubar.title" = "Usage";
 "menubar.open-main" = "Main Window";
 "menubar.no-profiles" = "No profiles are shown in the menu bar. Use a profile’s … menu in the main window to enable visibility.";
@@ -355,10 +356,12 @@
 "settings.menubar.status-item" = "Show in the menu bar";
 "settings.menubar.status-item.accessibility-label" = "Show the menu bar item";
 "settings.menubar.status-item-description" = "Turn this off to hide the menu bar item.\nProfile and notification settings are kept.";
-"settings.menubar.compact" = "Show compact remaining usage in the menu bar (minimum)";
-"settings.menubar.profiles-title" = "Profiles shown in the menu bar";
+"settings.menubar.compact" = "Show remaining usage in the menu bar";
+"settings.menubar.status-profile-title" = "Profile for remaining usage";
+"settings.menubar.status-profile-automatic" = "Minimum across visible profiles (automatic)";
+"settings.menubar.profiles-title" = "Profiles shown in the popover";
 "settings.menubar.profile-visibility" = "Show {name} in the menu bar";
-"settings.menubar.description" = "When enabled, the app remains available in the menu bar after its main window closes.\nChoose which profiles and remaining-usage details appear there.";
+"settings.menubar.description" = "The menu bar shows one selected profile or the minimum across visible profiles.\nChoose the profiles shown in the popover separately.";
 "profile.menu.hide-menubar" = "Hide from menu bar";
 "profile.menu.show-menubar" = "Show in menu bar";
 "profile.menu.favorite" = "Add to favorites";

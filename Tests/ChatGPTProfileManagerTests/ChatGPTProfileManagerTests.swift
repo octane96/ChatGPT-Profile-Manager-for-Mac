@@ -227,6 +227,46 @@ final class ChatGPTProfileManagerTests: XCTestCase {
         XCTAssertFalse(MenuBarPreferences.compactUsageEnabled(in: defaults))
     }
 
+    func testMenuBarSelectedProfilePersistsIndependentlyOfPopoverVisibility() throws {
+        let suiteName = "ChatGPTProfileManagerStatusProfileTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = ProfileStateStore(defaults: defaults)
+        let visible = try store.addAccount(named: "Visible", linkToExistingEnvironment: false)
+        let selected = try store.addAccount(named: "Selected", linkToExistingEnvironment: false)
+        try store.setAccountMenuBarVisibility(id: selected.id, isVisible: false)
+        XCTAssertEqual(MenuBarPreferences.statusAccounts(from: store.accounts, in: defaults).map(\.id), [visible.id])
+
+        MenuBarPreferences.setStatusAccountID(selected.id, in: defaults)
+        try store.renameAccount(id: selected.id, to: "Renamed")
+        let reloadedDefaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        let reloadedAccounts = ProfileStateStore(defaults: reloadedDefaults).accounts
+        XCTAssertEqual(MenuBarPreferences.statusAccountID(in: reloadedDefaults), selected.id)
+        XCTAssertEqual(MenuBarPreferences.statusAccounts(from: reloadedAccounts, in: reloadedDefaults).map(\.name), ["Renamed"])
+
+        let snapshots = [
+            visible.id: try XCTUnwrap(AccountUsageSnapshot(
+                primary: UsageWindow(usedPercent: 90, windowDurationMinutes: 300, resetsAt: nil),
+                secondary: nil
+            )),
+            selected.id: try XCTUnwrap(AccountUsageSnapshot(
+                primary: UsageWindow(usedPercent: 20, windowDurationMinutes: 300, resetsAt: nil),
+                secondary: nil
+            ))
+        ]
+        let summary = MenuBarUsageSummary.minimum(
+            accountIDs: MenuBarPreferences.statusAccounts(from: reloadedAccounts, in: reloadedDefaults).map(\.id),
+            snapshots: snapshots
+        )
+        XCTAssertEqual(summary.fiveHour, 80)
+        XCTAssertEqual(summary.title, "5h 80%\nW —")
+
+        try store.removeAccount(id: selected.id)
+        XCTAssertEqual(MenuBarPreferences.statusAccounts(from: store.accounts, in: defaults).map(\.id), [visible.id])
+        MenuBarPreferences.setStatusAccountID(nil, in: defaults)
+        XCTAssertNil(MenuBarPreferences.statusAccountID(in: defaults))
+    }
+
     func testMenuBarStatusItemVisibilityDefaultsToEnabledAndSupportsOptOut() throws {
         let suiteName = "ChatGPTProfileManagerMenuBarVisibilityTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))

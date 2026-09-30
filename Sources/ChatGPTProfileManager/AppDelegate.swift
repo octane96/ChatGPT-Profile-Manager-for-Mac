@@ -351,7 +351,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             return
         }
 
-        let accounts = menuBarAccounts
+        let accounts = MenuBarPreferences.statusAccounts(
+            from: launcher.accounts,
+            in: UserDefaults.standard
+        )
         let summary = MenuBarUsageSummary.minimum(
             accountIDs: accounts.map(\.id),
             snapshots: usageByAccountID
@@ -367,12 +370,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         if let labelWidth = statusUsageLabel?.fittingSize.width {
             statusItem?.length = max(NSStatusBar.system.thickness, ceil(labelWidth))
         }
-        let scope = L10n.text(
+        let selectedAccount = accounts.first.flatMap { account in
+            MenuBarPreferences.statusAccountID(in: UserDefaults.standard) == account.id ? account : nil
+        }
+        let scope = selectedAccount.map {
+            L10n.text(
+                "menubar.selected-profile-tooltip",
+                fallback: "{name}の残量",
+                replacing: ["name": $0.name]
+            )
+        } ?? L10n.text(
             "menubar.scope-tooltip",
             fallback: "表示中の{count}プロファイルの最小残量",
             replacing: ["count": "\(accounts.count)"]
         )
-        let updated = lastUsageRefreshAt.map { formatFetchDate($0) }
+        let updatedAt = selectedAccount.flatMap { usageLastUpdatedAt[$0.id] } ?? (selectedAccount == nil ? lastUsageRefreshAt : nil)
+        let updated = updatedAt.map { formatFetchDate($0) }
             ?? L10n.text("common.unknown", fallback: "不明")
         button.toolTip = "\(scope)（\(L10n.text("usage.last-updated", fallback: "最終確認: {date}", replacing: ["date": updated]))）"
     }
@@ -3889,7 +3902,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         let compactCheckbox = NSButton(
             checkboxWithTitle: L10n.text(
                 "settings.menubar.compact",
-                fallback: "メニューバーに残量を表示（最小値）"
+                fallback: "メニューバーに残量を表示"
             ),
             target: self,
             action: #selector(toggleCompactUsageSetting(_:))
@@ -3897,9 +3910,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         compactCheckbox.state = compactUsageStatusEnabled ? .on : .off
         menuBarStack.addArrangedSubview(compactCheckbox)
         settingsMenuBarDependentControls.append(compactCheckbox)
+        let statusProfileTitle = NSTextField(labelWithString: L10n.text(
+            "settings.menubar.status-profile-title",
+            fallback: "残量を表示するプロファイル"
+        ))
+        statusProfileTitle.font = .systemFont(ofSize: 12, weight: .medium)
+        menuBarStack.addArrangedSubview(statusProfileTitle)
+        settingsMenuBarDependentControls.append(statusProfileTitle)
+        let statusProfileSelector = NSPopUpButton()
+        statusProfileSelector.target = self
+        statusProfileSelector.action = #selector(changeMenuBarStatusProfile(_:))
+        statusProfileSelector.addItem(withTitle: L10n.text(
+            "settings.menubar.status-profile-automatic",
+            fallback: "表示中プロファイルの最小値（自動）"
+        ))
+        let selectedStatusAccountID = MenuBarPreferences.statusAccountID(in: UserDefaults.standard)
+        for account in launcher.accounts {
+            statusProfileSelector.addItem(withTitle: account.name)
+            statusProfileSelector.lastItem?.representedObject = account.id
+            if account.id == selectedStatusAccountID {
+                statusProfileSelector.select(statusProfileSelector.lastItem)
+            }
+        }
+        statusProfileSelector.setAccessibilityLabel(statusProfileTitle.stringValue)
+        menuBarStack.addArrangedSubview(statusProfileSelector)
+        settingsMenuBarDependentControls.append(statusProfileSelector)
+        statusProfileSelector.widthAnchor.constraint(equalTo: menuBarStack.widthAnchor).isActive = true
         let profileVisibilityTitle = NSTextField(labelWithString: L10n.text(
             "settings.menubar.profiles-title",
-            fallback: "表示するプロファイル"
+            fallback: "ポップアップに表示するプロファイル"
         ))
         profileVisibilityTitle.font = .systemFont(ofSize: 12, weight: .medium)
         menuBarStack.addArrangedSubview(profileVisibilityTitle)
@@ -3937,7 +3976,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         let menuBarDescription = NSTextField(
             wrappingLabelWithString: L10n.text(
                 "settings.menubar.description",
-                fallback: "メニューバーに表示すると、メインウィンドウを閉じても利用状況を確認できます。\n表示するプロファイルと残量表示を個別に設定できます。"
+                fallback: "メニューバーの残量は指定した1件、または表示中プロファイルの最小値を表示します。\nポップアップの表示対象は個別に設定できます。"
             )
         )
         menuBarDescription.font = .systemFont(ofSize: 12)
@@ -4390,6 +4429,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         UserDefaults.standard.set(
             sender.state == .on,
             forKey: compactUsageStatusEnabledKey
+        )
+        updateStatusItem()
+    }
+
+    @objc
+    private func changeMenuBarStatusProfile(_ sender: NSPopUpButton) {
+        MenuBarPreferences.setStatusAccountID(
+            sender.selectedItem?.representedObject as? UUID,
+            in: UserDefaults.standard
         )
         updateStatusItem()
     }

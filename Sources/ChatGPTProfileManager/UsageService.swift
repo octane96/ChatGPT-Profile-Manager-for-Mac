@@ -61,6 +61,7 @@ enum UsageRefreshMerger {
 enum MenuBarPreferences {
     static let statusItemEnabledKey = "menuBarStatusItemEnabled"
     static let compactUsageStatusKey = "compactUsageStatusEnabled"
+    static let statusAccountIDKey = "menuBarStatusAccountID"
 
     static func statusItemEnabled(in defaults: UserDefaults) -> Bool {
         (defaults.object(forKey: statusItemEnabledKey) as? Bool) ?? true
@@ -68,6 +69,28 @@ enum MenuBarPreferences {
 
     static func compactUsageEnabled(in defaults: UserDefaults) -> Bool {
         (defaults.object(forKey: compactUsageStatusKey) as? Bool) ?? true
+    }
+
+    static func statusAccountID(in defaults: UserDefaults) -> UUID? {
+        defaults.string(forKey: statusAccountIDKey).flatMap(UUID.init(uuidString:))
+    }
+
+    static func setStatusAccountID(_ accountID: UUID?, in defaults: UserDefaults) {
+        if let accountID {
+            defaults.set(accountID.uuidString, forKey: statusAccountIDKey)
+        } else {
+            defaults.removeObject(forKey: statusAccountIDKey)
+        }
+    }
+
+    static func statusAccounts(from accounts: [AccountProfile], in defaults: UserDefaults) -> [AccountProfile] {
+        if let selectedID = statusAccountID(in: defaults),
+           let selected = accounts.first(where: { $0.id == selectedID }) {
+            return [selected]
+        }
+        // Preserve the existing minimum display until a profile is selected,
+        // and fall back to it if the selected registration is removed.
+        return accounts.filter(\.showsInMenuBar)
     }
 }
 
