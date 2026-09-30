@@ -981,6 +981,48 @@ final class ChatGPTProfileManagerTests: XCTestCase {
         XCTAssertEqual(snapshot.displayPlanName, "Pro")
     }
 
+    func testProWeeklyOnlyResponseDoesNotAppearAsFiveHourUsage() throws {
+        let response = Data(#"""
+        {"result":{"rateLimits":{"planType":"pro","primary":{"usedPercent":33,"windowDurationMins":10080,"resetsAt":1788755352},"secondary":null}}}
+        """#.utf8)
+        let snapshot = try XCTUnwrap(AccountUsageSnapshot(jsonData: response))
+        XCTAssertNil(snapshot.primary)
+        XCTAssertEqual(snapshot.secondary?.remainingPercent, 67)
+        XCTAssertEqual(snapshot.secondary?.resetsAt, Date(timeIntervalSince1970: 1788755352))
+        let accountID = UUID()
+        XCTAssertEqual(MenuBarUsageSummary.minimum(accountIDs: [accountID], snapshots: [accountID: snapshot]).title, "5h —\nW 67%")
+    }
+
+    func testUsageWindowsFollowDurationWhenAPIPositionsAreReversed() throws {
+        let response = Data(#"""
+        {"result":{"rateLimits":{"primary":{"usedPercent":33,"windowDurationMins":10080},"secondary":{"usedPercent":15,"windowDurationMins":300}}}}
+        """#.utf8)
+        let snapshot = try XCTUnwrap(AccountUsageSnapshot(jsonData: response))
+        XCTAssertEqual(snapshot.primary?.remainingPercent, 85)
+        XCTAssertEqual(snapshot.secondary?.remainingPercent, 67)
+    }
+
+    func testUnknownDurationIsNotMislabeledAsFiveHourOrWeekly() throws {
+        let response = Data(#"""
+        {"result":{"rateLimits":{"primary":{"usedPercent":90,"windowDurationMins":60},"secondary":{"usedPercent":25,"windowDurationMins":10080}}}}
+        """#.utf8)
+        let snapshot = try XCTUnwrap(AccountUsageSnapshot(jsonData: response))
+        XCTAssertNil(snapshot.primary)
+        XCTAssertEqual(snapshot.secondary?.remainingPercent, 75)
+    }
+
+    func testCodexLimitTakesPriorityOverLegacyModelSpecificLimit() throws {
+        let response = Data(#"""
+        {"result":{
+            "rateLimits":{"limitId":"codex_other","primary":{"usedPercent":90,"windowDurationMins":300}},
+            "rateLimitsByLimitId":{"codex":{"planType":"pro","primary":{"usedPercent":33,"windowDurationMins":10080},"secondary":null}}
+        }}
+        """#.utf8)
+        let snapshot = try XCTUnwrap(AccountUsageSnapshot(jsonData: response))
+        XCTAssertNil(snapshot.primary)
+        XCTAssertEqual(snapshot.secondary?.remainingPercent, 67)
+    }
+
     func testResetCreditsSortKnownExpirationsBeforeUnknownDates() {
         let earliest = Date(timeIntervalSince1970: 1_700_000_000)
         let latest = Date(timeIntervalSince1970: 1_800_000_000)

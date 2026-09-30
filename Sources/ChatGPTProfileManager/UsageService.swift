@@ -15,11 +15,8 @@ struct MenuBarUsageSummary: Equatable, Sendable {
     let weekly: Int?
 
     var title: String {
-        let lines = [
-            fiveHour.map { "5h \($0)%" },
-            weekly.map { "W \($0)%" }
-        ].compactMap { $0 }
-        return lines.isEmpty ? "—" : lines.joined(separator: "\n")
+        guard fiveHour != nil || weekly != nil else { return "—" }
+        return "5h \(fiveHour.map { "\($0)%" } ?? "—")\nW \(weekly.map { "\($0)%" } ?? "—")"
     }
 
     static func minimum(
@@ -164,6 +161,8 @@ struct RateLimitResetCredit: Equatable, Sendable {
 }
 
 struct AccountUsageSnapshot: Equatable, Sendable {
+    // These are normalized UI slots: primary is 5H, secondary is Weekly.
+    // The API's primary/secondary positions can change with the account plan.
     let primary: UsageWindow?
     let secondary: UsageWindow?
     let planType: String?
@@ -202,8 +201,12 @@ struct AccountUsageSnapshot: Equatable, Sendable {
             return nil
         }
 
-        primary = Self.window(from: rateLimits["primary"])
-        secondary = Self.window(from: rateLimits["secondary"])
+        let windows = Self.normalizedWindows(
+            primary: Self.window(from: rateLimits["primary"]),
+            secondary: Self.window(from: rateLimits["secondary"])
+        )
+        primary = windows.fiveHour
+        secondary = windows.weekly
         let rawPlanType = (rateLimits["planType"] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         planType = rawPlanType?.isEmpty == false ? rawPlanType : nil
@@ -220,27 +223,36 @@ struct AccountUsageSnapshot: Equatable, Sendable {
         planType: String? = nil,
         rateLimitResetCredits: RateLimitResetCreditsSummary? = nil
     ) {
-        guard primary != nil || secondary != nil || rateLimitResetCredits != nil else {
+        let windows = Self.normalizedWindows(primary: primary, secondary: secondary)
+        guard windows.fiveHour != nil || windows.weekly != nil || rateLimitResetCredits != nil else {
             return nil
         }
-        self.primary = primary
-        self.secondary = secondary
+        self.primary = windows.fiveHour
+        self.secondary = windows.weekly
         self.planType = planType
         self.rateLimitResetCredits = rateLimitResetCredits
     }
 
     private static func rateLimits(from result: [String: Any]) -> [String: Any]? {
-        if let rateLimits = result["rateLimits"] as? [String: Any] {
-            return rateLimits
+        if let allRateLimits = result["rateLimitsByLimitId"] as? [String: Any],
+           let codexRateLimits = allRateLimits["codex"] as? [String: Any] {
+            return codexRateLimits
         }
+        return result["rateLimits"] as? [String: Any]
+    }
 
-        guard
-            let allRateLimits = result["rateLimitsByLimitId"] as? [String: Any],
-            let codexRateLimits = allRateLimits["codex"] as? [String: Any]
-        else {
-            return nil
-        }
-        return codexRateLimits
+    private static func normalizedWindows(
+        primary: UsageWindow?,
+        secondary: UsageWindow?
+    ) -> (fiveHour: UsageWindow?, weekly: UsageWindow?) {
+        let windows = [primary, secondary].compactMap { $0 }
+        // Older responses omitted duration. Only those responses retain the
+        // legacy positional mapping; an explicit duration always takes priority.
+        let fiveHour = windows.first { $0.windowDurationMinutes == 300 }
+            ?? (primary?.windowDurationMinutes == nil ? primary : nil)
+        let weekly = windows.first { $0.windowDurationMinutes == 10_080 }
+            ?? (secondary?.windowDurationMinutes == nil ? secondary : nil)
+        return (fiveHour, weekly)
     }
 
     private static func window(from value: Any?) -> UsageWindow? {
