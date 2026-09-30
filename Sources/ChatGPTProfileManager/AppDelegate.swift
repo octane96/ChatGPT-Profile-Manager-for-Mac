@@ -312,7 +312,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
 
     private func startUsageRefreshTimer() {
         usageRefreshTimer?.invalidate()
-        usageRefreshTimer = Timer.scheduledTimer(withTimeInterval: 15 * 60, repeats: true) { [weak self] _ in
+        usageRefreshTimer = Timer.scheduledTimer(withTimeInterval: 3 * 60, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.refreshUsage()
             }
@@ -404,12 +404,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     @objc
     private func toggleStatusPopover() {
         guard let popover = statusPopover, let button = statusItem?.button else { return }
+        refreshUsage()
         if popover.isShown {
             popover.performClose(nil)
             return
-        }
-        if lastUsageRefreshAt == nil || Date().timeIntervalSince(lastUsageRefreshAt ?? .distantPast) > 5 * 60 {
-            refreshUsage()
         }
         updateStatusPopover()
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
