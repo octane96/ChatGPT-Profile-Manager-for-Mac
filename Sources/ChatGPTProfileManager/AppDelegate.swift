@@ -56,12 +56,6 @@ private final class ProfileBadgeView: NSView {
     }
 }
 
-private final class MenuBarUsageLabel: NSTextField {
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        nil
-    }
-}
-
 enum ApplicationTerminationPolicy {
     /// Window-based auto-quit utilities can send a quit Apple Event shortly
     /// after the main window is hidden. In-app quit actions bypass this guard.
@@ -214,7 +208,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     private var statusPopoverDismissal: StatusPopoverDismissal?
     private var statusPopoverDocument: NSView?
     private var statusPopoverStack: NSStackView?
-    private weak var statusUsageLabel: MenuBarUsageLabel?
+    private var statusPresentation: MenuBarStatusPresentation?
     private weak var statusPopoverProfileSelector: NSPopUpButton?
     private weak var settingsStatusProfileSelector: NSPopUpButton?
     private let menuBarIcon = MenuBarIcon.make()
@@ -248,26 +242,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         guard statusItem == nil else { return }
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         guard let button = item.button else { return }
-        button.image = menuBarIcon
-        button.imagePosition = .imageOnly
-        button.imageScaling = .scaleProportionallyDown
         button.target = self
         button.action = #selector(toggleStatusPopover)
-
-        let usageLabel = MenuBarUsageLabel(labelWithString: "")
-        usageLabel.font = .monospacedDigitSystemFont(ofSize: 10, weight: .semibold)
-        usageLabel.alignment = .left
-        usageLabel.maximumNumberOfLines = 2
-        usageLabel.lineBreakMode = .byClipping
-        usageLabel.translatesAutoresizingMaskIntoConstraints = false
-        usageLabel.isHidden = true
-        button.addSubview(usageLabel)
-        NSLayoutConstraint.activate([
-            usageLabel.leadingAnchor.constraint(equalTo: button.leadingAnchor),
-            usageLabel.trailingAnchor.constraint(equalTo: button.trailingAnchor),
-            usageLabel.centerYAnchor.constraint(equalTo: button.centerYAnchor)
-        ])
-        statusUsageLabel = usageLabel
+        statusPresentation = MenuBarStatusPresentation(statusItem: item, icon: menuBarIcon)
         button.setAccessibilityLabel(L10n.text(
             "menubar.accessibility-label",
             fallback: "ChatGPT Profile Managerの利用状況"
@@ -302,6 +279,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         statusPopover?.performClose(nil)
         statusPopoverDismissal?.stopMonitoring()
         statusPopoverDismissal = nil
+        statusPresentation?.invalidate()
+        statusPresentation = nil
         if let statusItem {
             NSStatusBar.system.removeStatusItem(statusItem)
         }
@@ -309,7 +288,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         statusPopover = nil
         statusPopoverDocument = nil
         statusPopoverStack = nil
-        statusUsageLabel = nil
         statusPopoverProfileSelector = nil
     }
 
@@ -348,20 +326,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
     }
 
     private func updateStatusItem() {
-        guard let button = statusItem?.button else { return }
+        guard let statusPresentation else { return }
         guard compactUsageStatusEnabled else {
-            button.title = ""
-            button.font = nil
-            button.alignment = .center
-            statusUsageLabel?.isHidden = true
-            statusItem?.length = NSStatusItem.variableLength
-            button.image = menuBarIcon
-            button.imagePosition = .imageOnly
-            button.imageScaling = .scaleProportionallyDown
-            button.toolTip = L10n.text(
+            statusPresentation.showIcon(toolTip: L10n.text(
                 "menubar.tooltip",
                 fallback: "ChatGPT Profile Managerの利用状況を表示"
-            )
+            ))
             return
         }
 
@@ -374,16 +344,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
             snapshots: usageByAccountID
         )
         let title = summary.title
-        button.title = ""
-        button.font = nil
-        button.alignment = .center
-        button.image = nil
-        button.imagePosition = .noImage
-        statusUsageLabel?.stringValue = title
-        statusUsageLabel?.isHidden = false
-        if let labelWidth = statusUsageLabel?.fittingSize.width {
-            statusItem?.length = max(NSStatusBar.system.thickness, ceil(labelWidth))
-        }
         let selectedAccount = accounts.first.flatMap { account in
             MenuBarPreferences.statusAccountID(in: UserDefaults.standard) == account.id ? account : nil
         }
@@ -401,7 +361,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTa
         let updatedAt = selectedAccount.flatMap { usageLastUpdatedAt[$0.id] } ?? (selectedAccount == nil ? lastUsageRefreshAt : nil)
         let updated = updatedAt.map { formatFetchDate($0) }
             ?? L10n.text("common.unknown", fallback: "不明")
-        button.toolTip = "\(scope)（\(L10n.text("usage.last-updated", fallback: "最終確認: {date}", replacing: ["date": updated]))）"
+        statusPresentation.showUsage(
+            title: title,
+            toolTip: "\(scope)（\(L10n.text("usage.last-updated", fallback: "最終確認: {date}", replacing: ["date": updated]))）",
+            accessibilityValue: "\(scope): \(title.replacingOccurrences(of: "\n", with: ", "))"
+        )
     }
 
     @objc

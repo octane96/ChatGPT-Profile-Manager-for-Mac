@@ -353,6 +353,14 @@ swift test
 swift build -c release
 ```
 
+メニューバー表示のCPU負荷は、ログイン中のmacOSデスクトップで次のコマンドから確認できます。製品の表示クラスを使う一時的なメニューバー項目を10分間表示し、3分間隔でダミーの残量を更新します。実プロファイルや認証情報は使用しません。実行中アプリ全体の負荷や通信処理は、この検証には含まれません。
+
+Run this check from a logged-in macOS desktop to measure menu-bar rendering. It shows a temporary status item using the production presentation classes for ten minutes and updates synthetic usage every three minutes. It does not access real profiles or credentials, and does not measure the full running app or its network requests.
+
+```sh
+sh scripts/check-menu-bar-performance.sh
+```
+
 配布用アプリとZIPは次のスクリプトで作成できます。既存の同名出力がある場合は、スクリプトが上書きを防止して終了します。
 
 Build the app bundle and ZIP with the following script. If an output with the same name already exists, the script exits instead of overwriting it.
